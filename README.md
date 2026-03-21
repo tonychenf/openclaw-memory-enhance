@@ -1,27 +1,63 @@
 # Mem0 Agent Setup
 
-为 AI Agent 配置 Mem0 向量记忆系统的自动化安装工具。
+为 AI Agent 配置向量记忆系统，让 AI 拥有"长期记忆"能力。
 
-## 功能
+## 😰 痛点
 
-- ✅ 自动安装 Mem0 和依赖
-- ✅ 自动配置 Qdrant 向量数据库
-- ✅ 自动部署监听脚本
-- ✅ 支持 systemd 开机自启
-- ✅ 多 Agent 支持
+你是否遇到过这些问题？
 
-## 快速开始
+| 场景 | 问题 |
+|------|------|
+| **每次重启都是新人** | AI 客服每次都要用户重复介绍自己的情况 |
+| **上下文越来越长** | 对话历史越来越长，API 成本暴增 |
+| **重要信息被遗忘** | 用户说过偏好/需求，转头就忘了 |
+| **多 Agent 记忆混乱** | 多个 AI Agent 之间记忆互相串门 |
+
+**本质问题**：大语言模型没有长期记忆能力！
+
+## 💡 解决方案
+
+Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
+
+```
+用户说"我最喜欢蓝色" → 自动存储到向量数据库
+用户下次问"有什么推荐" → 自动检索"蓝色偏好" → 个性化推荐
+```
+
+**核心能力**：
+- 🧠 **语义记忆**：不是关键词匹配，而是理解含义
+- 📝 **自动同步**：对话自动写入，无需人工介入
+- 🔍 **智能检索**：每次回复前自动读取相关记忆
+- 🔒 **隐私隔离**：不同用户/Agent 记忆完全隔离
+
+## ✨ 功能
+
+- ✅ **一键安装**：bash install.sh 搞定全部
+- ✅ **自动记忆**：对话同时自动写入向量库
+- ✅ **智能检索**：每次回复前自动检索相关记忆
+- ✅ **多 Agent 支持**：main / capital / dev 等独立记忆
+- ✅ **systemd 自启**：开机自动运行，永不丢失
+- ✅ **命令行工具**：status / stats / search 随时查看
+
+## 📋 适用场景
+
+| 场景 | 说明 |
+|------|------|
+| **AI 客服** | 记住用户历史问题和偏好 |
+| **个人 AI 助手** | 记住主人的喜好、习惯、目标 |
+| **多 Agent 系统** | 每个 Agent 独立记忆，不串台 |
+| **知识助手** | 记住用户的专业背景和查询习惯 |
+
+## 🚀 快速开始
 
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/your-repo/mem0-agent-setup.git
+git clone https://github.com/tonychenf/mem0-agent-setup.git
 cd mem0-agent-setup
 ```
 
 ### 2. 填写配置
-
-复制配置模板并填写：
 
 ```bash
 cp config/config.yaml.example config/config.yaml
@@ -34,62 +70,102 @@ cp config/config.yaml.example config/config.yaml
 bash install.sh
 ```
 
-## 配置说明
+### 4. 测试一下
 
-### config.yaml
+```bash
+# 查看状态
+mem0-agent status
+
+# 查看记忆数量
+mem0-agent stats
+
+# 搜索记忆
+mem0-agent search "我的偏好"
+```
+
+## 📖 配置说明
+
+### config.yaml 完整示例
 
 ```yaml
-# 向量数据库
+# 向量数据库（Qdrant）
 qdrant:
   host: localhost
   port: 6333
 
-# LLM API
+# LLM API（SiliconFlow / OpenAI 等）
 llm:
   api_base_url: "https://api.siliconflow.cn/v1"
   api_key: "your-api-key"
   model: "Qwen/Qwen2.5-7B-Instruct"
 
-# Embedding
+# Embedding 模型
 embedding:
   model: "BAAI/bge-large-zh-v1.5"
   dimensions: 1024
 
 # Agent 配置
 agent:
-  id: "main"
-  user_id: "your-user-id"
-  collection: "mem0_main"
+  id: "main"           # Agent 标识
+  user_id: "user1"     # 用户标识
+  collection: "mem0_main"  # 记忆集合
 
 # 监听配置
 watch:
-  interval: 5000  # 毫秒
-  sessions_dir: "/root/.openclaw/agents/main/sessions"
+  interval: 5000        # 检查间隔（毫秒）
 ```
 
-## 命令行选项
+## 🛠 命令行工具
 
 ```bash
-./bin/mem0-agent-setup [选项]
-
-选项:
-  --agent-id <id>       Agent ID (默认: main)
-  --config <path>       配置文件路径
-  --no-systemd          跳过 systemd 安装
-  --uninstall           卸载
-  --help                显示帮助
+mem0-agent status    # 查看服务状态
+mem0-agent start     # 启动服务
+mem0-agent stop      # 停止服务
+mem0-agent restart   # 重启服务
+mem0-agent logs      # 查看日志
+mem0-agent stats     # 查看记忆数量
+mem0-agent search "关键词"  # 搜索记忆
 ```
 
-## 系统要求
+## 🧠 工作原理
+
+```
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐
+│  用户对话   │───▶│ sessions目录  │───▶│ 监听脚本    │
+└─────────────┘    └──────────────┘    └──────┬──────┘
+                                               │
+                                               ▼
+                                        ┌─────────────┐
+                                        │  Mem0 SDK   │
+                                        └──────┬──────┘
+                                               │
+                    ┌──────────────────────────┘
+                    ▼
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐
+│  用户回复   │◀───│ 语义检索     │◀───│ Qdrant向量库│
+└─────────────┘    └──────────────┘    └─────────────┘
+```
+
+**读取流程**：
+1. 用户发来消息
+2. 自动检索向量库中相关记忆
+3. 将记忆融入上下文
+4. 生成回复
+
+## 🔧 系统要求
 
 - Linux (Ubuntu 20.04+)
 - Python 3.8+
-- Docker (用于 Qdrant)
+- Docker（用于 Qdrant 向量数据库）
 
-## 文档
+## 📚 文档
 
-- [客户端配置指南](https://your-docs-url)
+- [客户端配置指南（飞书文档）](https://www.feishu.cn/docx/Pj1EdcEYyo92wfx1XoTcCiq5nPg)
 
-## License
+## 🤝 贡献
+
+欢迎提交 Issue 和 PR！
+
+## 📄 License
 
 MIT
