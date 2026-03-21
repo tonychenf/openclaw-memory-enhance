@@ -47,6 +47,8 @@ Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
 ## ✨ 功能
 
 - ✅ **一键安装**：bash install.sh 搞定全部
+- ✅ **智能检测**：自动识别已安装组件，不重复安装
+- ✅ **多 Agent 自动配置**：自动检测 OpenClaw 中的所有 Agent 并批量配置
 - ✅ **自动记忆**：对话同时自动写入向量库
 - ✅ **智能检索**：每次回复前自动检索相关记忆
 - ✅ **多 Agent 支持**：main / capital / dev 等独立记忆
@@ -81,8 +83,21 @@ cp config/config.yaml.example config/config.yaml
 ### 3. 一键安装
 
 ```bash
+# 安装单个 Agent（默认 main）
 bash install.sh
+
+# 自动检测并配置所有 Agent（推荐！）
+bash install.sh --auto
+
+# 指定 Agent
+bash install.sh --agent-id capital
+
+# 卸载
+bash install.sh --uninstall
+bash install.sh --uninstall-all
 ```
+
+> 💡 `--auto` 会自动检测 OpenClaw 中的所有 Agent（main、capital、dev 等），并为每个 Agent 配置独立的记忆系统
 
 ### 4. 测试一下
 

@@ -1,5 +1,6 @@
 #!/bin/bash
 # Mem0 Agent Setup - 一键安装脚本
+# 支持自动检测和批量配置多 Agent
 
 set -e
 
@@ -7,12 +8,14 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
 # 默认配置
 AGENT_ID="main"
 CONFIG_FILE=""
 INSTALL_SYSTEMD=true
+AUTO_DETECT_ALL=false
 
 # 解析参数
 while [[ $# -gt 0 ]]; do
@@ -29,8 +32,15 @@ while [[ $# -gt 0 ]]; do
             INSTALL_SYSTEMD=false
             shift
             ;;
+        --auto)
+            AUTO_DETECT_ALL=true
+            shift
+            ;;
         --uninstall)
             uninstall
+            ;;
+        --uninstall-all)
+            uninstall_all
             ;;
         --help)
             show_help
@@ -47,10 +57,12 @@ show_help() {
     echo ""
     echo "选项:"
     echo "  --agent-id <id>       Agent ID (默认: main)"
-    echo "  --config <path>       配置文件路径"
-    echo "  --no-systemd          跳过 systemd 安装"
-    echo "  --uninstall           卸载"
-    echo "  --help                显示帮助"
+    echo "  --config <path>      配置文件路径"
+    echo "  --no-systemd         跳过 systemd 安装"
+    echo "  --auto               自动检测并配置所有 Agent"
+    echo "  --uninstall          卸载当前 Agent"
+    echo "  --uninstall-all      卸载所有 Agent"
+    echo "  --help               显示帮助"
     exit 0
 }
 
@@ -66,79 +78,110 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# 检查依赖
-check_dependencies() {
-    log_info "检查依赖..."
-    
-    if ! command -v python3 &> /dev/null; then
-        log_error "Python3 未安装"
-        exit 1
-    fi
-    
-    if ! command -v docker &> /dev/null; then
-        log_warn "Docker 未安装，将跳过 Qdrant 部署"
+log_skip() {
+    echo -e "${BLUE}[SKIP]${NC} $1"
+}
+
+# ========== 检测函数 ==========
+
+# 检查 Python
+check_python() {
+    if command -v python3 &> /dev/null; then
+        log_skip "Python3 已安装"
+        return 0
+    else
+        log_info "安装 Python3..."
+        apt-get update -qq && apt-get install -y -qq python3 python3-pip
+        return 1
     fi
 }
 
-# 安装 Mem0
-install_mem0() {
-    log_info "安装 Mem0..."
-    pip install mem0ai -q
+# 检查 Mem0
+check_mem0() {
+    if python3 -c "import mem0" 2>/dev/null; then
+        log_skip "Mem0 已安装"
+        return 0
+    else
+        log_info "安装 Mem0..."
+        pip3 install mem0ai pyyaml -q
+        return 1
+    fi
 }
 
-# 部署 Qdrant
-deploy_qdrant() {
+# 检查 Qdrant
+check_qdrant() {
     if docker ps | grep -q qdrant; then
-        log_info "Qdrant 已运行"
-        return
+        log_skip "Qdrant 已运行"
+        return 0
     fi
     
-    log_info "部署 Qdrant..."
-    docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant
-    log_info "Qdrant 部署完成 (localhost:6333)"
+    if curl -s http://localhost:6333/ >/dev/null 2>&1; then
+        log_skip "Qdrant 已运行（外部）"
+        return 0
+    fi
+    
+    if command -v docker &> /dev/null; then
+        log_info "部署 Qdrant..."
+        docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant
+        log_info "Qdrant 部署完成 (localhost:6333)"
+        return 1
+    else
+        log_warn "Docker 未安装，跳过 Qdrant"
+        return 0
+    fi
 }
 
-# 部署监听脚本
-deploy_scripts() {
-    log_info "部署监听脚本..."
-    
+# 检查脚本
+check_scripts() {
     SCRIPT_DIR="/root/.openclaw/workspace/scripts"
     mkdir -p "$SCRIPT_DIR"
     
-    # 复制脚本
-    cp scripts/watch_sessions.js "$SCRIPT_DIR/"
-    cp scripts/sync_to_mem0.py "$SCRIPT_DIR/"
-    
-    # 替换配置
-    if [ -n "$CONFIG_FILE" ]; then
-        # 从配置文件读取并替换
-        log_info "使用配置文件: $CONFIG_FILE"
+    if [ -f "$SCRIPT_DIR/watch_sessions.js" ] && [ -f "$SCRIPT_DIR/sync_to_mem0.py" ]; then
+        log_skip "监听脚本已部署"
+        return 0
+    else
+        log_info "部署监听脚本..."
+        cp scripts/watch_sessions.js "$SCRIPT_DIR/"
+        cp scripts/sync_to_mem0.py "$SCRIPT_DIR/"
+        return 1
     fi
-    
-    log_info "脚本部署完成"
 }
 
-# 安装 systemd 服务
-install_systemd() {
-    if [ "$INSTALL_SYSTEMD" = false ]; then
-        log_info "跳过 systemd 安装"
-        return
+# 检查 systemd 服务
+check_systemd() {
+    SERVICE_NAME="openclaw-session-watch"
+    
+    if systemctl is-active --quiet ${SERVICE_NAME} 2>/dev/null; then
+        log_skip "systemd 服务已运行: ${SERVICE_NAME}"
+        return 0
+    fi
+    return 1
+}
+
+# ========== 部署函数 ==========
+
+# 部署 systemd 服务（单个 Agent）
+deploy_systemd_service() {
+    local agent_id=$1
+    local SERVICE_NAME="openclaw-session-watch"
+    
+    if systemctl is-active --quiet ${SERVICE_NAME} 2>/dev/null; then
+        log_skip "服务已运行: ${SERVICE_NAME}"
+        return 0
     fi
     
-    log_info "安装 systemd 服务..."
-    
-    SERVICE_NAME="openclaw-session-watch"
+    log_info "安装 systemd 服务: ${SERVICE_NAME} (Agent: ${agent_id})"
     
     cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
 [Unit]
-Description=OpenClaw Session Watcher - ${AGENT_ID}
+Description=OpenClaw Session Watcher - ${agent_id}
 After=network.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/root/.openclaw/workspace
-ExecStart=/usr/bin/node /root/.openclaw/workspace/scripts/watch_sessions.js ${AGENT_ID}
+ExecStart=/usr/bin/node /root/.openclaw/workspace/scripts/watch_sessions.js ${agent_id}
 Restart=always
 RestartSec=10
 
@@ -150,17 +193,100 @@ EOF
     systemctl enable ${SERVICE_NAME}
     systemctl start ${SERVICE_NAME}
     
-    log_info "systemd 服务已启动"
+    log_info "systemd 服务已启动: ${SERVICE_NAME}"
+    return 1
 }
 
-# 卸载
+# ========== 多 Agent 检测 ==========
+
+# 检测 OpenClaw 中的 Agent
+detect_agents() {
+    local AGENTS_DIR="/root/.openclaw/agents"
+    
+    if [ ! -d "$AGENTS_DIR" ]; then
+        echo "main"
+        return
+    fi
+    
+    # 查找所有 agent 目录
+    local agents=$(ls -1 "$AGENTS_DIR" 2>/dev/null | grep -v "^_" | grep -v "workspace" | grep -v "scripts" || true)
+    
+    if [ -z "$agents" ]; then
+        echo "main"
+        return
+    fi
+    
+    echo "$agents"
+}
+
+# 检测所有 Agent 并配置
+auto_setup_all_agents() {
+    log_info "========== 自动检测 OpenClaw Agent =========="
+    
+    local agents=$(detect_agents)
+    local agent_count=$(echo "$agents" | wc -w)
+    
+    log_info "检测到 $agent_count 个 Agent: $agents"
+    echo ""
+    
+    for agent in $agents; do
+        log_info "========== 配置 Agent: $agent =========="
+        AGENT_ID=$agent install_single_agent
+        echo ""
+    done
+    
+    log_info "========== 所有 Agent 配置完成！=========="
+}
+
+# 安装单个 Agent
+install_single_agent() {
+    log_info "配置 Agent: $AGENT_ID"
+    
+    # 1. 检查/安装 Python
+    check_python
+    
+    # 2. 检查/安装 Mem0
+    check_mem0
+    
+    # 3. 检查/部署 Qdrant
+    check_qdrant
+    
+    # 4. 检查/部署脚本
+    check_scripts
+    
+    # 5. 检查/启动 systemd
+    if [ "$INSTALL_SYSTEMD" = true ]; then
+        deploy_systemd_service "$AGENT_ID"
+    fi
+}
+
+# ========== 卸载函数 ==========
+
+# 卸载单个
 uninstall() {
     log_info "卸载 Mem0 Agent Setup..."
     
-    # 停止服务
-    systemctl stop openclaw-session-watch 2>/dev/null || true
-    systemctl disable openclaw-session-watch 2>/dev/null || true
-    rm -f /etc/systemd/system/openclaw-session-watch.service
+    SERVICE_NAME="openclaw-session-watch"
+    
+    systemctl stop ${SERVICE_NAME} 2>/dev/null || true
+    systemctl disable ${SERVICE_NAME} 2>/dev/null || true
+    rm -f /etc/systemd/system/${SERVICE_NAME}.service
+    
+    log_info "卸载完成"
+}
+
+# 卸载所有
+uninstall_all() {
+    log_info "========== 卸载所有 Agent =========="
+    
+    # 停止所有服务
+    for svc in $(ls /etc/systemd/system/openclaw-session-watch*.service 2>/dev/null | xargs -n1 basename 2>/dev/null || true); do
+        log_info "停止服务: $svc"
+        systemctl stop "$svc" 2>/dev/null || true
+        systemctl disable "$svc" 2>/dev/null || true
+    done
+    
+    rm -f /etc/systemd/system/openclaw-session-watch*.service
     
     # 删除脚本
     rm -f /root/.openclaw/workspace/scripts/watch_sessions.js
@@ -169,29 +295,41 @@ uninstall() {
     log_info "卸载完成"
 }
 
-# 主函数
+# ========== 主函数 ==========
+
 main() {
-    log_info "Mem0 Agent Setup 安装程序"
-    log_info "Agent ID: $AGENT_ID"
+    echo ""
+    echo -e "${GREEN}╔══════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║        Mem0 Agent Setup v1.0                     ║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
     echo ""
     
-    check_dependencies
-    install_mem0
-    
-    if command -v docker &> /dev/null; then
-        deploy_qdrant
-    fi
-    
-    deploy_scripts
-    
-    if [ "$INSTALL_SYSTEMD" = true ]; then
-        install_systemd
+    if [ "$AUTO_DETECT_ALL" = true ]; then
+        # 自动检测并配置所有 Agent
+        check_dependencies
+        auto_setup_all_agents
+    else
+        # 单个 Agent 安装
+        log_info "配置 Agent: $AGENT_ID"
+        echo ""
+        
+        check_dependencies
+        install_single_agent
     fi
     
     echo ""
-    log_info "安装完成!"
+    log_info "========== 安装完成！=========="
     log_info "查看状态: systemctl status openclaw-session-watch"
     log_info "查看日志: journalctl -u openclaw-session-watch -f"
+    log_info "查看记忆: mem0-agent stats"
+}
+
+# 检查基础依赖
+check_dependencies() {
+    if ! command -v python3 &> /dev/null; then
+        log_error "Python3 未安装"
+        exit 1
+    fi
 }
 
 main
