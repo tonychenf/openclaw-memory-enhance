@@ -25,7 +25,10 @@ def get_memory(collection_name: str = "mem0_main"):
     """获取指定 Agent 的记忆实例"""
     config = {
         'vector_store': {
+            'provider': 'qdrant',
             'config': {
+                'host': 'localhost',
+                'port': 6333,
                 'collection_name': collection_name,
                 'embedding_model_dims': 1024
             }
