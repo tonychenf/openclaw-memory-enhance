@@ -56,6 +56,35 @@ Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
 - ✅ **systemd 自启**：开机自动运行，永不丢失
 - ✅ **命令行工具**：status / stats / search 随时查看
 
+### 🆕 v3.1 新功能
+
+| 功能 | 说明 |
+|------|------|
+| **重要性评分** | 1-5分自动评分，核心信息(5分)永不过期 |
+| **记忆分类** | 自动分类为 episodic/semantic/procedural |
+| **Rerank排序** | LLM 二次排序，提升相关性 |
+| **自动清理** | 定时删除过期记忆（cron 可选） |
+
+### 评分规则
+
+```
+5分: 核心信息（名字、身份、关系、承诺）
+4分: 重要偏好（喜欢、讨厌、重要习惯）
+3分: 一般信息（日常对话）
+2分: 临时信息（随手提到）
+1分: 无价值（客套话）
+```
+
+### 过期清理
+
+```bash
+# 手动清理（删除30天前的低分记忆）
+python3 scripts/memory_cleanup.py
+
+# 可设置 cron 每天自动执行
+0 3 * * * python3 /root/.openclaw/workspace/memory_cleanup.py
+```
+
 ## 📋 适用场景
 
 | 场景 | 说明 |
@@ -199,6 +228,15 @@ mem0-agent logs      # 查看日志
 mem0-agent stats     # 查看记忆数量
 mem0-agent search "关键词"  # 搜索记忆
 ```
+
+## 📂 脚本说明
+
+| 脚本 | 功能 |
+|------|------|
+| `scripts/auto_memory.py` | 保存记忆（含评分、分类） |
+| `scripts/auto_recall.py` | 读取记忆（含 rerank 排序） |
+| `scripts/memory_sync.py` | 批量同步历史记忆 |
+| `scripts/memory_cleanup.py` | 清理过期记忆 |
 
 ## 🧠 工作原理
 
