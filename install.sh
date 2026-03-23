@@ -254,13 +254,58 @@ check_scripts() {
         fi
     fi
 
-    if [ -f "$SCRIPT_DIR/watch_sessions.js" ] && [ -f "$SCRIPT_DIR/sync_to_mem0.py" ]; then
-        log_skip "监听脚本已部署"
+    # 需要部署的所有脚本
+    local SCRIPTS=(
+        "watch_sessions.js"
+        "sync_to_mem0.py"
+        "auto_recall.py"
+        "auto_memory.py"
+        "memory_cleanup.py"
+        "memory_sync.py"
+    )
+
+    # 检查是否所有脚本都已部署
+    local all_deployed=true
+    for script in "${SCRIPTS[@]}"; do
+        if [ ! -f "$SCRIPT_DIR/$script" ]; then
+            all_deployed=false
+            break
+        fi
+    done
+
+    if [ "$all_deployed" = true ]; then
+        log_skip "所有脚本已部署"
         return 0
     else
-        log_info "部署监听脚本到 $SCRIPT_DIR..."
-        cp scripts/watch_sessions.js "$SCRIPT_DIR/"
-        cp scripts/sync_to_mem0.py "$SCRIPT_DIR/"
+        log_info "部署脚本到 $SCRIPT_DIR..."
+        for script in "${SCRIPTS[@]}"; do
+            if [ -f "scripts/$script" ]; then
+                cp scripts/"$script" "$SCRIPT_DIR/"/
+            fi
+        done
+        # 部署 mem0-agent CLI
+        if [ -f "bin/mem0-agent" ]; then
+            cp bin/mem0-agent "$SCRIPT_DIR/"/
+            chmod +x "$SCRIPT_DIR/mem0-agent"
+        fi
+        return 1
+    fi
+}
+
+# 设置清理 cron（每天凌晨 3 点执行 memory_cleanup.py）
+setup_cleanup_cron() {
+    local SCRIPTS_DIR=$(get_scripts_dir "$AGENT_ID")
+    # cron 命令：从 .env 读取 API key
+    local CRON_CMD='. /root/.openclaw/workspace/.env 2>/dev/null; AGENT_NAME='"$AGENT_ID"' python3 '"$SCRIPTS_DIR/memory_cleanup.py"
+    local CRON_JOB="0 3 * * * $CRON_CMD"
+
+    # 检查是否已有此 cron
+    if crontab -l 2>/dev/null | grep -q "memory_cleanup.py"; then
+        log_skip "清理 cron 已存在"
+        return 0
+    else
+        log_info "设置清理 cron (每天 03:00)..."
+        (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
         return 1
     fi
 }
@@ -385,6 +430,7 @@ install_single_agent() {
     if [ "$INSTALL_SYSTEMD" = true ]; then
         deploy_systemd_service "$AGENT_ID"
     fi
+
 }
 
 # ========== 卸载函数 ==========
@@ -405,10 +451,18 @@ uninstall() {
     # 删除脚本
     rm -f "$SCRIPTS_DIR/watch_sessions.js"
     rm -f "$SCRIPTS_DIR/sync_to_mem0.py"
-    
+    rm -f "$SCRIPTS_DIR/auto_recall.py"
+    rm -f "$SCRIPTS_DIR/auto_memory.py"
+    rm -f "$SCRIPTS_DIR/memory_cleanup.py"
+    rm -f "$SCRIPTS_DIR/memory_sync.py"
+    rm -f "$SCRIPTS_DIR/mem0-agent"
+
+    # 删除清理 cron
+    crontab -l 2>/dev/null | grep -v "memory_cleanup.py" | crontab - 2>/dev/null || true
+
     # 删除配置文件（可选）
     # rm -f "$ENV_FILE"
-    
+
     log_info "卸载完成"
 }
 
@@ -430,8 +484,16 @@ uninstall_all() {
         if [ -d "$dir/scripts" ]; then
             rm -f "$dir/scripts/watch_sessions.js"
             rm -f "$dir/scripts/sync_to_mem0.py"
+            rm -f "$dir/scripts/auto_recall.py"
+            rm -f "$dir/scripts/auto_memory.py"
+            rm -f "$dir/scripts/memory_cleanup.py"
+            rm -f "$dir/scripts/memory_sync.py"
+            rm -f "$dir/scripts/mem0-agent"
         fi
     done
+
+    # 删除清理 cron
+    crontab -l 2>/dev/null | grep -v "memory_cleanup.py" | crontab - 2>/dev/null || true
 
     log_info "卸载完成"
 }
@@ -462,6 +524,8 @@ main() {
 
         check_dependencies
         install_single_agent
+        # 设置清理 cron（独立于 SKIP_EXISTING）
+        AGENT_ID=$AGENT_ID setup_cleanup_cron
     fi
 
     echo ""
