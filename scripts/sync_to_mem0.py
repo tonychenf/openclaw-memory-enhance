@@ -123,6 +123,8 @@ def should_remember_and_score(user_msg: str, assistant_msg: str) -> dict:
 - 2分：临时信息（随口提到、可忽略）
 - 1分：无价值（客套话、问候）
 
+重要规则：score >= 3 时 should_remember 必须为 true，score < 3 时 should_remember 为 false。
+
 分类：
 - episodic: 事件记忆（做过的事、说过的话）
 - semantic: 语义记忆（偏好、习惯、关系、事实）

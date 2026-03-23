@@ -101,11 +101,12 @@ function syncFile(filepath) {
   
   try {
     const result = execSync(
-      `python3 /root/.openclaw/workspace/scripts/sync_to_mem0.py`,
+      `AGENT_NAME=${AGENT_ID} python3 /root/.openclaw/workspace/scripts/sync_to_mem0.py`,
       { 
         encoding: 'utf-8', 
         timeout: 30000,
-        input: messagesJson
+        input: messagesJson,
+        env: { ...process.env, AGENT_NAME: AGENT_ID }
       }
     );
     
