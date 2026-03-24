@@ -262,6 +262,7 @@ check_scripts() {
         "auto_memory.py"
         "memory_cleanup.py"
         "memory_sync.py"
+        "memory_distill_daily.py"
     )
 
     # 检查是否所有脚本都已部署
@@ -288,6 +289,24 @@ check_scripts() {
             cp bin/mem0-agent.py "$SCRIPT_DIR/"/
             chmod +x "$SCRIPT_DIR/mem0-agent.py"
         fi
+        return 1
+    fi
+}
+
+# 设置每日 distill cron（每天凌晨 4 点执行 memory_distill_daily.py）
+setup_distill_cron() {
+    local SCRIPTS_DIR=$(get_scripts_dir "$AGENT_ID")
+    # cron 命令：从 .env 读取 API key
+    local CRON_CMD='. /root/.openclaw/workspace/.env 2>/dev/null; python3 '"$SCRIPTS_DIR/memory_distill_daily.py --force"
+    local CRON_JOB="0 4 * * * $CRON_CMD"
+
+    # 检查是否已有此 cron
+    if crontab -l 2>/dev/null | grep -q "memory_distill_daily.py"; then
+        log_skip "Distill cron 已存在"
+        return 0
+    else
+        log_info "设置 Distill cron (每天 04:00)..."
+        (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
         return 1
     fi
 }
@@ -455,10 +474,11 @@ uninstall() {
     rm -f "$SCRIPTS_DIR/auto_memory.py"
     rm -f "$SCRIPTS_DIR/memory_cleanup.py"
     rm -f "$SCRIPTS_DIR/memory_sync.py"
+    rm -f "$SCRIPTS_DIR/memory_distill_daily.py"
     rm -f "$SCRIPTS_DIR/mem0-agent.py"
 
-    # 删除清理 cron
-    crontab -l 2>/dev/null | grep -v "memory_cleanup.py" | crontab - 2>/dev/null || true
+    # 删除清理 cron 和 distill cron
+    crontab -l 2>/dev/null | grep -v "memory_cleanup.py" | grep -v "memory_distill_daily.py" | crontab - 2>/dev/null || true
 
     # 删除配置文件（可选）
     # rm -f "$ENV_FILE"
@@ -487,13 +507,14 @@ uninstall_all() {
             rm -f "$dir/scripts/auto_recall.py"
             rm -f "$dir/scripts/auto_memory.py"
             rm -f "$dir/scripts/memory_cleanup.py"
+            rm -f "$dir/scripts/memory_distill_daily.py"
             rm -f "$dir/scripts/memory_sync.py"
             rm -f "$dir/scripts/mem0-agent.py"
         fi
     done
 
-    # 删除清理 cron
-    crontab -l 2>/dev/null | grep -v "memory_cleanup.py" | crontab - 2>/dev/null || true
+    # 删除清理 cron 和 distill cron
+    crontab -l 2>/dev/null | grep -v "memory_cleanup.py" | grep -v "memory_distill_daily.py" | crontab - 2>/dev/null || true
 
     log_info "卸载完成"
 }
@@ -526,6 +547,8 @@ main() {
         install_single_agent
         # 设置清理 cron（独立于 SKIP_EXISTING）
         AGENT_ID=$AGENT_ID setup_cleanup_cron
+        # 设置每日 distill cron
+        AGENT_ID=$AGENT_ID setup_distill_cron
     fi
 
     echo ""
