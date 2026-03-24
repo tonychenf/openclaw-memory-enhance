@@ -290,37 +290,19 @@ def main():
         since_dt = last
         print(f"上次蒸馏: {last.strftime('%Y-%m-%d %H:%M')}，处理此后新增的 session")
 
-    # 从暂存文件读取
-    print("📖 读取暂存对话文件...")
-    if not os.path.exists(STAGING_FILE):
-        print("  暂存文件不存在，没有待处理对话")
+    # 从 session 文件读取（根据上次蒸馏时间过滤）
+    print("📖 读取 session 文件...")
+    files = get_session_files(since_dt)
+    print(f"  找到 {len(files)} 个 session 文件")
+
+    if not files:
+        print("  没有新的 session 文件，退出")
         return
 
-    conversations = []
-    with open(STAGING_FILE) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-                msg = entry.get("msg", {})
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = " ".join(c.get("text", "") for c in content if c.get("type") == "text")
-                if role in ("user", "assistant") and content.strip():
-                    clean = extract_user_content(content) if role == "user" else content.strip()
-                    if clean and len(clean) > 5:
-                        conversations.append({
-                            "session": entry.get("agent", "unknown"),
-                            "role": role,
-                            "content": clean[:500]
-                        })
-            except:
-                pass
-
-    print(f"  从暂存文件读取了 {len(conversations)} 条对话片段")
+    # 读取对话
+    print("📝 提取对话内容...")
+    conversations = read_sessions(files)
+    print(f"  提取了 {len(conversations)} 条对话片段")
 
     if not conversations:
         print("没有对话内容，退出")
