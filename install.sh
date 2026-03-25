@@ -250,6 +250,8 @@ check_scripts() {
         if [ -f "scripts/config.env.example" ]; then
             log_info "创建配置文件 $ENV_FILE..."
             cp scripts/config.env.example "$ENV_FILE"
+            # 设置默认 MEM0_USER_ID（默认 owner，部署后建议改为实际用户名）
+            sed -i "s/^MEM0_USER_ID=owner$/MEM0_USER_ID=owner/" "$ENV_FILE"
             log_warn "请编辑 $ENV_FILE 填入你的 API Key！"
         fi
     fi
