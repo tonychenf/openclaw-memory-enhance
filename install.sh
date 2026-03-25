@@ -307,13 +307,12 @@ check_scripts() {
 }
 
 # 设置每日 distill cron（每天凌晨 4 点执行 memory_distill_daily.py）
-# 注意：系统 crontab 为全系统共享，此处仅供首次安装时创建主入口
-# 多 agent 场景建议使用 openclaw cron 管理（见 README）
+# 注意：脚本统一在共享目录，多 agent 共用同一套脚本
 setup_distill_cron() {
-    local SCRIPTS_DIR=$(get_scripts_dir "$AGENT_ID")
     local WORKSPACE_DIR=$(get_workspace_dir "$AGENT_ID")
-    # cron 命令：从对应 agent 的 .env 读取 API key
-    local CRON_CMD='. '"${WORKSPACE_DIR}/.env"' 2>/dev/null; AGENT_NAME='"$AGENT_ID"' python3 '"$SCRIPTS_DIR/memory_distill_daily.py"' --agent '"$AGENT_ID"' --force"
+    # 脚本统一在共享目录（mem0-agent-setup/scripts/），而非 per-agent 目录
+    local SHARED_SCRIPTS="/root/.openclaw/mem0-agent-setup/scripts"
+    local CRON_CMD='. '"${WORKSPACE_DIR}/.env"' 2>/dev/null; AGENT_NAME='"$AGENT_ID"' python3 '"$SHARED_SCRIPTS/memory_distill_daily.py"' --agent '"$AGENT_ID"' --force"
     local CRON_JOB="0 4 * * * $CRON_CMD"
 
     # 检查是否已有此类型的 distill cron（区分 agent）
@@ -329,10 +328,10 @@ setup_distill_cron() {
 
 # 设置清理 cron（每天凌晨 3 点执行 memory_cleanup.py）
 setup_cleanup_cron() {
-    local SCRIPTS_DIR=$(get_scripts_dir "$AGENT_ID")
     local WORKSPACE_DIR=$(get_workspace_dir "$AGENT_ID")
-    # cron 命令：从对应 agent 的 .env 读取 API key
-    local CRON_CMD='. '"${WORKSPACE_DIR}/.env"' 2>/dev/null; AGENT_NAME='"$AGENT_ID"' python3 '"$SCRIPTS_DIR/memory_cleanup.py"
+    local SHARED_SCRIPTS="/root/.openclaw/mem0-agent-setup/scripts"
+    # cron 命令：从对应 agent 的 .env 读取 API key，脚本在共享目录
+    local CRON_CMD='. '"${WORKSPACE_DIR}/.env"' 2>/dev/null; AGENT_NAME='"$AGENT_ID"' python3 '"$SHARED_SCRIPTS/memory_cleanup.py"
     local CRON_JOB="0 3 * * * $CRON_CMD"
 
     # 检查是否已有此类型的 cleanup cron（区分 agent）

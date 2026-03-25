@@ -108,7 +108,7 @@ function syncFile(filepath) {
   
   try {
     const result = execSync(
-      `AGENT_NAME=${AGENT_ID} python3 /root/.openclaw/workspace/scripts/sync_to_mem0.py`,
+      `AGENT_NAME=${AGENT_ID} python3 /root/.openclaw/mem0-agent-setup/scripts/sync_to_mem0.py`,
       { 
         encoding: 'utf-8', 
         timeout: 30000,
