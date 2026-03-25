@@ -258,8 +258,8 @@ check_scripts() {
     if [ -f "$ENV_FILE" ]; then
         # 设置 MEM0_USER_ID（如果缺失）
         if ! grep -q "^MEM0_USER_ID=" "$ENV_FILE"; then
-            echo "MEM0_USER_ID=${AGENT_ID}" >> "$ENV_FILE"
-            log_info "已添加 MEM0_USER_ID=${AGENT_ID} 到 $ENV_FILE"
+            echo "MEM0_USER_ID=fuge" >> "$ENV_FILE"
+            log_info "已添加 MEM0_USER_ID=fuge 到 $ENV_FILE"
         fi
         # 提示用户设置 API Key（如果为空）
         if grep -q "^OPENAI_API_KEY=$" "$ENV_FILE"; then

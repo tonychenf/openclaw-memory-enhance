@@ -164,7 +164,7 @@ export OPENAI_API_KEY="your-siliconflow-or-openai-api-key"
 # 必需：用户标识（用于 Mem0 记忆隔离）
 # 单用户部署：设为你的用户名（如 fuge、owner）
 # 多用户部署：每个用户设置不同的值，实现记忆隔离
-export MEM0_USER_ID="owner"
+export MEM0_USER_ID="fuge"
 
 # 可选：API Base URL（默认使用 SiliconFlow）
 export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
