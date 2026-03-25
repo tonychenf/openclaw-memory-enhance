@@ -82,8 +82,8 @@ check_existing_configs() {
 
     # 2. 检测 systemd 服务重复
     local SERVICE_NAME="openclaw-session-watch"
-    if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
-        conflicts+=("systemd 服务已存在: ${SERVICE_NAME}")
+    if [ -f "/etc/systemd/system/${SERVICE_NAME}-${AGENT_ID}.service" ]; then
+        conflicts+=("systemd 服务已存在: ${SERVICE_NAME}-${AGENT_ID}")
     fi
 
     # 3. 检测脚本重复
@@ -250,9 +250,20 @@ check_scripts() {
         if [ -f "scripts/config.env.example" ]; then
             log_info "创建配置文件 $ENV_FILE..."
             cp scripts/config.env.example "$ENV_FILE"
-            # 设置默认 MEM0_USER_ID（默认 owner，部署后建议改为实际用户名）
-            sed -i "s/^MEM0_USER_ID=owner$/MEM0_USER_ID=owner/" "$ENV_FILE"
-            log_warn "请编辑 $ENV_FILE 填入你的 API Key！"
+            log_warn "请编辑 $ENV_FILE 填入你的 API Key 和 MEM0_USER_ID！"
+        fi
+    fi
+
+    # 确保必要变量存在（即使 .env 已存在也要检查）
+    if [ -f "$ENV_FILE" ]; then
+        # 设置 MEM0_USER_ID（如果缺失）
+        if ! grep -q "^MEM0_USER_ID=" "$ENV_FILE"; then
+            echo "MEM0_USER_ID=${AGENT_ID}" >> "$ENV_FILE"
+            log_info "已添加 MEM0_USER_ID=${AGENT_ID} 到 $ENV_FILE"
+        fi
+        # 提示用户设置 API Key（如果为空）
+        if grep -q "^OPENAI_API_KEY=$" "$ENV_FILE"; then
+            log_warn "$ENV_FILE 中 OPENAI_API_KEY 未设置，请编辑填入！"
         fi
     fi
 
@@ -296,18 +307,21 @@ check_scripts() {
 }
 
 # 设置每日 distill cron（每天凌晨 4 点执行 memory_distill_daily.py）
+# 注意：系统 crontab 为全系统共享，此处仅供首次安装时创建主入口
+# 多 agent 场景建议使用 openclaw cron 管理（见 README）
 setup_distill_cron() {
     local SCRIPTS_DIR=$(get_scripts_dir "$AGENT_ID")
-    # cron 命令：从 .env 读取 API key
-    local CRON_CMD='. /root/.openclaw/workspace/.env 2>/dev/null; python3 '"$SCRIPTS_DIR/memory_distill_daily.py --force"
+    local WORKSPACE_DIR=$(get_workspace_dir "$AGENT_ID")
+    # cron 命令：从对应 agent 的 .env 读取 API key
+    local CRON_CMD='. '"${WORKSPACE_DIR}/.env"' 2>/dev/null; AGENT_NAME='"$AGENT_ID"' python3 '"$SCRIPTS_DIR/memory_distill_daily.py"' --agent '"$AGENT_ID"' --force"
     local CRON_JOB="0 4 * * * $CRON_CMD"
 
-    # 检查是否已有此 cron
-    if crontab -l 2>/dev/null | grep -q "memory_distill_daily.py"; then
-        log_skip "Distill cron 已存在"
+    # 检查是否已有此类型的 distill cron（区分 agent）
+    if crontab -l 2>/dev/null | grep -q "memory_distill_daily.py.*--agent.*$AGENT_ID"; then
+        log_skip "Distill cron (${AGENT_ID}) 已存在"
         return 0
     else
-        log_info "设置 Distill cron (每天 04:00)..."
+        log_info "设置 Distill cron (每天 04:00, agent=${AGENT_ID})..."
         (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
         return 1
     fi
@@ -316,16 +330,17 @@ setup_distill_cron() {
 # 设置清理 cron（每天凌晨 3 点执行 memory_cleanup.py）
 setup_cleanup_cron() {
     local SCRIPTS_DIR=$(get_scripts_dir "$AGENT_ID")
-    # cron 命令：从 .env 读取 API key
-    local CRON_CMD='. /root/.openclaw/workspace/.env 2>/dev/null; AGENT_NAME='"$AGENT_ID"' python3 '"$SCRIPTS_DIR/memory_cleanup.py"
+    local WORKSPACE_DIR=$(get_workspace_dir "$AGENT_ID")
+    # cron 命令：从对应 agent 的 .env 读取 API key
+    local CRON_CMD='. '"${WORKSPACE_DIR}/.env"' 2>/dev/null; AGENT_NAME='"$AGENT_ID"' python3 '"$SCRIPTS_DIR/memory_cleanup.py"
     local CRON_JOB="0 3 * * * $CRON_CMD"
 
-    # 检查是否已有此 cron
-    if crontab -l 2>/dev/null | grep -q "memory_cleanup.py"; then
-        log_skip "清理 cron 已存在"
+    # 检查是否已有此类型的 cleanup cron（区分 agent）
+    if crontab -l 2>/dev/null | grep -q "memory_cleanup.py.*--agent.*$AGENT_ID"; then
+        log_skip "清理 cron (${AGENT_ID}) 已存在"
         return 0
     else
-        log_info "设置清理 cron (每天 03:00)..."
+        log_info "设置清理 cron (每天 03:00, agent=${AGENT_ID})..."
         (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
         return 1
     fi
@@ -357,14 +372,14 @@ deploy_systemd_service() {
     local WORKSPACE_DIR=$(get_workspace_dir "$agent_id")
     local ENV_FILE="${WORKSPACE_DIR}/.env"
 
-    if systemctl is-active --quiet ${SERVICE_NAME} 2>/dev/null; then
-        log_skip "服务已运行: ${SERVICE_NAME}"
+    if systemctl is-active --quiet ${SERVICE_NAME}-${agent_id} 2>/dev/null; then
+        log_skip "服务已运行: ${SERVICE_NAME}-${agent_id}"
         return 0
     fi
 
-    log_info "安装 systemd 服务: ${SERVICE_NAME} (Agent: ${agent_id})"
+    log_info "安装 systemd 服务: ${SERVICE_NAME}-${agent_id} (Agent: ${agent_id})"
 
-    cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
+    cat > /etc/systemd/system/${SERVICE_NAME}-${agent_id}.service << EOF
 [Unit]
 Description=OpenClaw Session Watcher - ${agent_id}
 After=network.target
@@ -383,10 +398,10 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable ${SERVICE_NAME}
-    systemctl start ${SERVICE_NAME}
+    systemctl enable ${SERVICE_NAME}-${agent_id}
+    systemctl start ${SERVICE_NAME}-${agent_id}
 
-    log_info "systemd 服务已启动: ${SERVICE_NAME}"
+    log_info "systemd 服务已启动: ${SERVICE_NAME}-${agent_id}"
     return 1
 }
 
@@ -460,14 +475,14 @@ install_single_agent() {
 uninstall() {
     log_info "卸载 Mem0 Agent Setup..."
     
-    SERVICE_NAME="openclaw-session-watch"
+    local SERVICE_NAME="openclaw-session-watch"
     local SCRIPTS_DIR=$(get_scripts_dir "$AGENT_ID")
     local WORKSPACE_DIR=$(get_workspace_dir "$AGENT_ID")
     local ENV_FILE="${WORKSPACE_DIR}/.env"
     
-    systemctl stop ${SERVICE_NAME} 2>/dev/null || true
-    systemctl disable ${SERVICE_NAME} 2>/dev/null || true
-    rm -f /etc/systemd/system/${SERVICE_NAME}.service
+    systemctl stop ${SERVICE_NAME}-${AGENT_ID} 2>/dev/null || true
+    systemctl disable ${SERVICE_NAME}-${AGENT_ID} 2>/dev/null || true
+    rm -f /etc/systemd/system/${SERVICE_NAME}-${AGENT_ID}.service
 
     # 删除脚本
     rm -f "$SCRIPTS_DIR/watch_sessions.js"
