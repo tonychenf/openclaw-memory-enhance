@@ -266,7 +266,6 @@ check_scripts() {
             log_warn "$ENV_FILE 中 OPENAI_API_KEY 未设置，请编辑填入！"
         fi
     fi
-
     # 需要部署的所有脚本
     local SCRIPTS=(
         "watch_sessions.js"
@@ -307,20 +306,20 @@ check_scripts() {
 }
 
 # 设置每日 distill cron（每天凌晨 4 点执行 memory_distill_daily.py）
-# 注意：脚本统一在共享目录，多 agent 共用同一套脚本
 setup_distill_cron() {
     local WORKSPACE_DIR=$(get_workspace_dir "$AGENT_ID")
-    # 脚本统一在共享目录（mem0-agent-setup/scripts/），而非 per-agent 目录
+    # 脚本统一在共享目录，多 agent 共用同一套脚本
     local SHARED_SCRIPTS="/root/.openclaw/mem0-agent-setup/scripts"
-    local CRON_CMD='. '"${WORKSPACE_DIR}/.env"' 2>/dev/null; AGENT_NAME='"$AGENT_ID"' python3 '"$SHARED_SCRIPTS/memory_distill_daily.py"' --agent '"$AGENT_ID"' --force"
+    # cron 命令：从对应 agent 的 .env 读取 API key，脚本在共享目录
+    local CRON_CMD=". \"\${WORKSPACE_DIR}/.env\" 2>/dev/null; AGENT_NAME=\${AGENT_ID} python3 \"\${SHARED_SCRIPTS}/memory_distill_daily.py\" --agent \${AGENT_ID} --force"
     local CRON_JOB="0 4 * * * $CRON_CMD"
 
     # 检查是否已有此类型的 distill cron（区分 agent）
-    if crontab -l 2>/dev/null | grep -q "memory_distill_daily.py.*--agent.*$AGENT_ID"; then
-        log_skip "Distill cron (${AGENT_ID}) 已存在"
+    if crontab -l 2>/dev/null | grep -q "memory_distill_daily.py.*--agent.*\$AGENT_ID"; then
+        log_skip "Distill cron (\${AGENT_ID}) 已存在"
         return 0
     else
-        log_info "设置 Distill cron (每天 04:00, agent=${AGENT_ID})..."
+        log_info "设置 Distill cron (每天 04:00, agent=\${AGENT_ID})..."
         (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
         return 1
     fi
@@ -329,17 +328,18 @@ setup_distill_cron() {
 # 设置清理 cron（每天凌晨 3 点执行 memory_cleanup.py）
 setup_cleanup_cron() {
     local WORKSPACE_DIR=$(get_workspace_dir "$AGENT_ID")
+    # 脚本统一在共享目录，多 agent 共用同一套脚本
     local SHARED_SCRIPTS="/root/.openclaw/mem0-agent-setup/scripts"
     # cron 命令：从对应 agent 的 .env 读取 API key，脚本在共享目录
-    local CRON_CMD='. '"${WORKSPACE_DIR}/.env"' 2>/dev/null; AGENT_NAME='"$AGENT_ID"' python3 '"$SHARED_SCRIPTS/memory_cleanup.py"
+    local CRON_CMD=". \"\${WORKSPACE_DIR}/.env\" 2>/dev/null; AGENT_NAME=\${AGENT_ID} python3 \"\${SHARED_SCRIPTS}/memory_cleanup.py\""
     local CRON_JOB="0 3 * * * $CRON_CMD"
 
     # 检查是否已有此类型的 cleanup cron（区分 agent）
-    if crontab -l 2>/dev/null | grep -q "memory_cleanup.py.*--agent.*$AGENT_ID"; then
-        log_skip "清理 cron (${AGENT_ID}) 已存在"
+    if crontab -l 2>/dev/null | grep -q "memory_cleanup.py.*--agent.*\$AGENT_ID"; then
+        log_skip "清理 cron (\${AGENT_ID}) 已存在"
         return 0
     else
-        log_info "设置清理 cron (每天 03:00, agent=${AGENT_ID})..."
+        log_info "设置清理 cron (每天 03:00, agent=\${AGENT_ID})..."
         (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
         return 1
     fi
@@ -354,8 +354,8 @@ check_systemd() {
 
     SERVICE_NAME="openclaw-session-watch"
 
-    if systemctl is-active --quiet ${SERVICE_NAME} 2>/dev/null; then
-        log_skip "systemd 服务已运行: ${SERVICE_NAME}"
+    if systemctl is-active --quiet ${SERVICE_NAME}-${agent_id} 2>/dev/null; then
+        log_skip "systemd 服务已运行: ${SERVICE_NAME}-${agent_id}"
         return 0
     fi
     return 1
@@ -376,9 +376,9 @@ deploy_systemd_service() {
         return 0
     fi
 
-    log_info "安装 systemd 服务: ${SERVICE_NAME}-${agent_id} (Agent: ${agent_id})"
+    log_info "安装 systemd 服务: ${SERVICE_NAME} (Agent: ${agent_id})"
 
-    cat > /etc/systemd/system/${SERVICE_NAME}-${agent_id}.service << EOF
+    cat > /etc/systemd/system/${SERVICE_NAME}-${AGENT_ID}.service << EOF
 [Unit]
 Description=OpenClaw Session Watcher - ${agent_id}
 After=network.target
@@ -490,8 +490,8 @@ uninstall() {
     local WORKSPACE_DIR=$(get_workspace_dir "$AGENT_ID")
     local ENV_FILE="${WORKSPACE_DIR}/.env"
     
-    systemctl stop ${SERVICE_NAME}-${AGENT_ID} 2>/dev/null || true
-    systemctl disable ${SERVICE_NAME}-${AGENT_ID} 2>/dev/null || true
+    systemctl stop ${SERVICE_NAME} 2>/dev/null || true
+    systemctl disable ${SERVICE_NAME} 2>/dev/null || true
     rm -f /etc/systemd/system/${SERVICE_NAME}-${AGENT_ID}.service
 
     # 删除脚本
