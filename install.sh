@@ -241,7 +241,7 @@ check_scripts() {
 
     local SCRIPT_DIR=$(get_scripts_dir "$AGENT_ID")
     local WORKSPACE_DIR=$(get_workspace_dir "$AGENT_ID")
-    local ENV_FILE="${WORKSPACE_DIR}/.env"
+    local ENV_FILE="/root/.openclaw/mem0-agent-setup/.env"
 
     mkdir -p "$SCRIPT_DIR"
 
@@ -311,7 +311,7 @@ setup_distill_cron() {
     # 脚本统一在共享目录，多 agent 共用同一套脚本
     local SHARED_SCRIPTS="/root/.openclaw/mem0-agent-setup/scripts"
     # cron 命令：从对应 agent 的 .env 读取 API key，脚本在共享目录
-    local CRON_CMD=". \"\${WORKSPACE_DIR}/.env\" 2>/dev/null; AGENT_NAME=\${AGENT_ID} python3 \"\${SHARED_SCRIPTS}/memory_distill_daily.py\" --agent \${AGENT_ID} --force"
+    local CRON_CMD=". \"\/root/.openclaw/mem0-agent-setup/.env\" 2>/dev/null; AGENT_NAME=\${AGENT_ID} python3 \"\${SHARED_SCRIPTS}/memory_distill_daily.py\" --agent \${AGENT_ID} --force"
     local CRON_JOB="0 4 * * * $CRON_CMD"
 
     # 检查是否已有此类型的 distill cron（区分 agent）
@@ -331,7 +331,7 @@ setup_cleanup_cron() {
     # 脚本统一在共享目录，多 agent 共用同一套脚本
     local SHARED_SCRIPTS="/root/.openclaw/mem0-agent-setup/scripts"
     # cron 命令：从对应 agent 的 .env 读取 API key，脚本在共享目录
-    local CRON_CMD=". \"\${WORKSPACE_DIR}/.env\" 2>/dev/null; AGENT_NAME=\${AGENT_ID} python3 \"\${SHARED_SCRIPTS}/memory_cleanup.py\""
+    local CRON_CMD=". \"\/root/.openclaw/mem0-agent-setup/.env\" 2>/dev/null; AGENT_NAME=\${AGENT_ID} python3 \"\${SHARED_SCRIPTS}/memory_cleanup.py\""
     local CRON_JOB="0 3 * * * $CRON_CMD"
 
     # 检查是否已有此类型的 cleanup cron（区分 agent）
@@ -369,7 +369,7 @@ deploy_systemd_service() {
     local SERVICE_NAME="openclaw-session-watch"
     local SCRIPTS_DIR=$(get_scripts_dir "$agent_id")
     local WORKSPACE_DIR=$(get_workspace_dir "$agent_id")
-    local ENV_FILE="${WORKSPACE_DIR}/.env"
+    local ENV_FILE="/root/.openclaw/mem0-agent-setup/.env"
 
     if systemctl is-active --quiet ${SERVICE_NAME}-${agent_id} 2>/dev/null; then
         log_skip "服务已运行: ${SERVICE_NAME}-${agent_id}"
@@ -488,7 +488,7 @@ uninstall() {
     local SERVICE_NAME="openclaw-session-watch"
     local SCRIPTS_DIR=$(get_scripts_dir "$AGENT_ID")
     local WORKSPACE_DIR=$(get_workspace_dir "$AGENT_ID")
-    local ENV_FILE="${WORKSPACE_DIR}/.env"
+    local ENV_FILE="/root/.openclaw/mem0-agent-setup/.env"
     
     systemctl stop ${SERVICE_NAME} 2>/dev/null || true
     systemctl disable ${SERVICE_NAME} 2>/dev/null || true

@@ -108,15 +108,12 @@ cd mem0-agent-setup
 ### 2. 配置环境变量
 
 ```bash
+# .env 文件位置：/root/.openclaw/mem0-agent-setup/.env（所有 Agent 共用）
 # 复制配置模板
-cp scripts/config.env.example .env
+cp scripts/config.env.example /root/.openclaw/mem0-agent-setup/.env
 
 # 编辑 .env 文件，填入你的 API Key
-vim .env
-
-# 或者直接设置环境变量（推荐）
-export OPENAI_API_KEY="your-api-key-here"
-export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
+vim /root/.openclaw/mem0-agent-setup/.env
 ```
 
 > ⚠️ **必须设置 `OPENAI_API_KEY`** 环境变量，否则脚本无法运行
