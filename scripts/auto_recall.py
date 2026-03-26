@@ -23,9 +23,10 @@ def load_workspace_env():
         "rich": "/root/.openclaw/workspace-rich",
         "taizi": "/root/.openclaw/workspace-taizi",
     }
-    # 优先从 caller 传入的 WORKSPACE_DIR 读
+    # 优先从 WORKSPACE_DIR 环境变量读
     workspace_dir = os.environ.get("WORKSPACE_DIR", "")
-    if workspace_dir:
+    if workspace_dir and os.path.isdir(workspace_dir):
+        # 优先用 .env 文件（明确配置）
         env_file = os.path.join(workspace_dir, ".env")
         if os.path.exists(env_file):
             with open(env_file) as f:
@@ -35,7 +36,14 @@ def load_workspace_env():
                         k, v = line.split("=", 1)
                         if k.strip() == "AGENT_ID":
                             return v.strip()
-    # 否则遍历找存在的 .env
+        # 其次：从 workspace 路径推导（workspace-capital → capital）
+        basename = os.path.basename(workspace_dir.rstrip("/"))
+        if basename.startswith("workspace-"):
+            return basename[len("workspace-"):]
+        elif basename == "workspace":
+            return "main"
+
+    # 再次：遍历已知 workspace 找存在的 .env
     for agent_id, ws_path in workspace_map.items():
         env_file = os.path.join(ws_path, ".env")
         if os.path.exists(env_file):
@@ -46,6 +54,7 @@ def load_workspace_env():
                         k, v = line.split("=", 1)
                         if k.strip() == "AGENT_ID":
                             return v.strip()
+
     return "main"
 
 _detected_agent_id = None
