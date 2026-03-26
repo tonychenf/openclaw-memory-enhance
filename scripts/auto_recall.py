@@ -10,50 +10,21 @@ import os, sys, re, json
 from pathlib import Path
 from collections import defaultdict
 
-# === Workspace .env 加载（从对应 workspace 读取 AGENT_ID） ===
-def load_workspace_env():
-    """从 workspace 的 .env 文件加载 AGENT_ID"""
-    # 已知的所有 workspace 路径
-    workspace_map = {
-        "main": "/root/.openclaw/workspace",
-        "capital": "/root/.openclaw/workspace-capital",
-        "dev": "/root/.openclaw/workspace-dev",
-        "legal": "/root/.openclaw/workspace-legal",
-        "ops": "/root/.openclaw/workspace-ops",
-        "rich": "/root/.openclaw/workspace-rich",
-        "taizi": "/root/.openclaw/workspace-taizi",
-    }
-    # 优先从 WORKSPACE_DIR 环境变量读
-    workspace_dir = os.environ.get("WORKSPACE_DIR", "")
-    if workspace_dir and os.path.isdir(workspace_dir):
-        # 优先用 .env 文件（明确配置）
-        env_file = os.path.join(workspace_dir, ".env")
-        if os.path.exists(env_file):
-            with open(env_file) as f:
-                for line in f:
-                    line = line.strip()
-                    if "=" in line and not line.startswith("#"):
-                        k, v = line.split("=", 1)
-                        if k.strip() == "AGENT_ID":
-                            return v.strip()
-        # 其次：从 workspace 路径推导（workspace-capital → capital）
-        basename = os.path.basename(workspace_dir.rstrip("/"))
-        if basename.startswith("workspace-"):
-            return basename[len("workspace-"):]
-        elif basename == "workspace":
-            return "main"
+# === Workspace 路径推导（唯一路径） ===
+def detect_agent_id_from_workspace():
+    """
+    从 WORKSPACE_DIR 环境变量推导 agent ID。
+    唯一路径：workspace-xxx → xxx，workspace → main
+    """
+    workspace_dir = os.environ.get("WORKSPACE_DIR", "").rstrip("/")
+    if not workspace_dir:
+        return "main"
 
-    # 再次：遍历已知 workspace 找存在的 .env
-    for agent_id, ws_path in workspace_map.items():
-        env_file = os.path.join(ws_path, ".env")
-        if os.path.exists(env_file):
-            with open(env_file) as f:
-                for line in f:
-                    line = line.strip()
-                    if "=" in line and not line.startswith("#"):
-                        k, v = line.split("=", 1)
-                        if k.strip() == "AGENT_ID":
-                            return v.strip()
+    basename = os.path.basename(workspace_dir)
+    if basename.startswith("workspace-"):
+        return basename[len("workspace-"):]
+    elif basename == "workspace":
+        return "main"
 
     return "main"
 
@@ -64,8 +35,9 @@ def get_agent_id():
     global _detected_agent_id
     if _detected_agent_id is not None:
         return _detected_agent_id
-    # 优先用 AGENT_NAME 环境变量（systemd watchdog 设置的）
-    _detected_agent_id = os.environ.get("AGENT_NAME", "") or load_workspace_env()
+    # 优先用 AGENT_NAME 环境变量（systemd watchdog 场景）
+    # 其次用 WORKSPACE_DIR 路径推导（gateway 场景）
+    _detected_agent_id = os.environ.get("AGENT_NAME", "") or detect_agent_id_from_workspace()
     return _detected_agent_id
 
 # === 共享 .env 加载 ===
