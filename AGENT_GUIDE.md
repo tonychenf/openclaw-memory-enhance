@@ -285,13 +285,14 @@ python3 /root/.openclaw/mem0-agent-setup/scripts/memory_distill_daily.py \
 
 ---
 
-## Active Recall 与 Context 拼接（v5 架构）
+## Active Recall 与 Context 拼接（v6 架构）
 
-### 核心改进
+### 核心改进（相比 v5）
 
-1. **层级分类**：每条记忆明确标注属于哪一层（Semantic/Episodic/Procedural）
-2. **层级定义**：每层有明确的定义 prompt，告诉 AI 在什么场景下使用这些记忆
-3. **Session 完整上下文**：不只是返回 block 内容，还从 [files:/path] 拉取原始 session 片段
+1. **扁平分组输出**：每层定义只出现一次，block 用 ` | ` 分隔独立成行
+2. **Session 上下文内联**：原始 session 片段直接跟在 block 后面，不再嵌套缩进
+3. **严谨性**：空值保护、异常捕获、超长文本截断
+4. **可拓展性**：常量可配置、层级定义外部化、collection 自动检测
 
 ### 三层层级定义
 
@@ -301,44 +302,52 @@ python3 /root/.openclaw/mem0-agent-setup/scripts/memory_distill_daily.py \
 | **Episodic 事件层** | "回答请参考用户的历史决策、重大事件" | 涉及项目进展、决策历史 |
 | **Procedural 程序层** | "回答请遵循用户认可的工作流程和操作步骤" | 涉及操作流程、方法论 |
 
-### Block 新格式
+### Block 存储格式（蒸馏时）
 
 ```
-[层级:Episodic][层级定义:回答请参考用户的历史决策、重大事件][score:5][distilled][sessions:2][files:/path/to/s1.jsonl,/path/to/s2.jsonl]
+[层级:Episodic][score:5][distilled][sessions:2][files:/path/to/s1.jsonl,/path/to/s2.jsonl]
 用户提到项目ABC需要在周五前完成测试报告
 ```
 
-### Context 拼接效果
+> 注意：层级定义不存进 block，recall 时由 `LAYER_DEFINITIONS` 硬编码注入。
+
+### Recall 输出格式（v6）
 
 ```
-## 📚 相关记忆（按层级分类）
+## 📚 相关记忆
 
-🧠 **语义层** — 回答请符合用户偏好、沟通习惯、语言风格
+回答请参考用户的历史决策、重大事件：
+  [事件]用户提到项目ABC需要在周五前完成测试报告 [score=5] | [session_xxx.jsonl]: 👤 用户说了什么 | 🤖 助手回复
 
-  • 用户喜欢简洁的回复 [score=4]
-    └ 01a3b4c.jsonl
-      user: 请帮我查一下
-      assistant: 好的，这是结果
+回答请遵循用户认可的工作流程和操作步骤：
+  [程序]修复了auto_recall.py的collection硬编码问题 [score=4] | [session_yyy.jsonl]: 🔧 工具结果
+```
 
-📅 **事件层** — 回答请参考用户的历史决策、重大事件
+**格式规则：**
+- 每层定义只出现一次（不是每个 block 都重复）
+- 同一层内每条 block 独立一行，用 ` | ` 连接 block 和 session 上下文
+- Session 上下文格式：`[filename]: icon text | icon text`
+- 层级前缀：`[语义]` / `[事件]` / `[程序]`
 
-  • 用户提到项目ABC需要在周五前完成 [score=5]
-    └ 05e6f7a.jsonl
-      user: 项目ABC进度如何？
-      assistant: 周五前可以完成
-      user: 记得包含测试报告
-    └ 09h2i8b.jsonl
-      user: 质量第一
+### Agent ID 自动检测（v6 新增）
 
-⚙️ **程序层** — 回答请遵循用户认可的工作流程和操作步骤
+auto_recall.py 启动时自动检测当前 agent，优先级：
 
-  • 用户要求所有代码必须先写测试再提交 [score=5]
-    └ 12k3l4m.jsonl
-      user: 如何提交代码？
-      assistant: 先写测试，测试通过后再提交MR
+```
+1. AGENT_NAME 环境变量（systemd watchdog 场景）
+2. WORKSPACE_DIR/.env（gateway agent 场景）
+3. 遍历已知 workspace 目录查找 .env
+4. fallback: main
+```
+
+**每个 workspace 有独立的 `.env` 文件：**
+```
+/root/.openclaw/workspace/.env          → AGENT_ID=main
+/root/.openclaw/workspace-capital/.env  → AGENT_ID=capital
+/root/.openclaw/workspace-dev/.env     → AGENT_ID=dev
 ```
 
 ### 实施文件
 
 - `memory_distill_daily.py` — 蒸馏时增加层级分类
-- `auto_recall.py` — 按层级分组 + 读取 session 上下文
+- `auto_recall.py` — 扁平分组输出 + session 上下文内联 + agent ID 自动检测

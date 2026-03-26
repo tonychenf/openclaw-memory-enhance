@@ -68,14 +68,14 @@ Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
 | **Rerank排序** | LLM 二次排序，提升相关性 |
 | **自动清理** | 定时删除过期记忆（cron 可选） |
 
-### 🆕 v5 新功能（Active Recall）
+### 🆕 v6 新功能（Active Recall）
 
 | 功能 | 说明 |
 |------|------|
-| **层级分类** | 蒸馏时自动判断记忆属于 Semantic/Episodic/Procedural 层 |
-| **层级定义** | 每层附带定义 prompt，告诉 AI 在什么场景下使用 |
-| **Session 上下文** | 检索时从 [files:/path] 读取原始 session 片段 |
-| **Mem0 URL 修复** | 修复 Mem0 SDK 搜索时本地/远程 Qdrant 连接问题 |
+| **扁平分组输出** | 每层定义只出现一次，block 用 ` | ` 分隔独立成行 |
+| **Session 上下文内联** | 原始 session 片段直接跟在 block 后面 |
+| **Agent ID 自动检测** | 从 workspace/.env 自动读取，无需手动配置 |
+| **层级定义硬编码注入** | recall 时由 LAYER_DEFINITIONS 提供，不存 block |
 
 ### 三层层级定义
 
@@ -85,30 +85,23 @@ Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
 | **Episodic 事件层** | "回答请参考用户的历史决策、重大事件" | 涉及项目进展、决策历史 |
 | **Procedural 程序层** | "回答请遵循用户认可的工作流程和操作步骤" | 涉及操作流程、方法论 |
 
-### Block 格式（v5）
+### Block 存储格式（蒸馏时）
 
 ```
-[层级:Episodic][层级定义:回答请参考用户的历史决策、重大事件][score:5][distilled][sessions:2][files:/path/s1.jsonl,/path/s2.jsonl]
+[层级:Episodic][score:5][distilled][sessions:2][files:/path/s1.jsonl,/path/s2.jsonl]
 用户提到项目ABC需要在周五前完成测试报告
 ```
 
-### Context 拼接效果（v5）
-
-检索结果按三层分组，每条记忆附带原始 session 片段：
+### Recall 输出格式（v6）
 
 ```
-📅 事件层 — 回答请参考用户的历史决策、重大事件
-  • 用户提到项目ABC需要在周五前完成 [score=4]
-    └ session_a.jsonl
-      user: 项目ABC进度如何？
-      assistant: 周五前可以完成
-      user: 记得包含测试报告
+## 📚 相关记忆
 
-⚙️ 程序层 — 回答请遵循用户认可的工作流程
-  • 用户要求先写测试再提交 [score=5]
-    └ session_b.jsonl
-      user: 如何提交代码？
-      assistant: 先写测试再提交MR
+回答请参考用户的历史决策、重大事件：
+  [事件]用户提到项目ABC需要在周五前完成测试报告 [score=5] | [session_xxx.jsonl]: 👤 用户说了什么 | 🤖 助手回复
+
+回答请遵循用户认可的工作流程和操作步骤：
+  [程序]修复了auto_recall.py的collection硬编码问题 [score=4] | [session_yyy.jsonl]: 🔧 工具结果
 ```
 
 ### 评分规则
