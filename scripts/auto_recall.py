@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-auto_recall - 自动记忆读取（v5）
-支持层级分类 + Session 完整上下文
+auto_recall - 自动记忆读取（v6）
+设计目标：
+- 分组扁平输出：每层定义出现一次，block 用 | 分隔
+- 严谨性：边界条件、空值、异常全面处理
+- 可拓展性：层级定义外部化、输出格式可配置、session 上下文策略可扩展
 """
 import os, sys, re, json
 from pathlib import Path
@@ -28,35 +31,40 @@ os.environ["OPENAI_BASE_URL"] = BASE_URL
 from mem0 import Memory
 from openai import OpenAI
 
-# === 层级定义 ===
+# === 层级定义（可外部化，未来可从配置文件读取） ===
 LAYER_DEFINITIONS = {
     "semantic": "回答请符合用户偏好、沟通习惯、语言风格",
     "episodic": "回答请参考用户的历史决策、重大事件",
     "procedural": "回答请遵循用户认可的工作流程和操作步骤"
 }
 
-LAYER_ICONS = {
-    "semantic": "🧠",
-    "episodic": "📅",
-    "procedural": "⚙️",
-    "unknown": "❓"
+LAYER_SHORT_NAMES = {
+    "semantic": "语义",
+    "episodic": "事件",
+    "procedural": "程序",
+    "unknown": "未知"
 }
 
-LAYER_NAMES_CN = {
-    "semantic": "语义层",
-    "episodic": "事件层",
-    "procedural": "程序层",
-    "unknown": "未知层"
-}
+# === 可配置常量 ===
+DEFAULT_MIN_SCORE = 2
+DEFAULT_LIMIT = 8
+DEFAULT_MAX_FILES_PER_BLOCK = 2          # 每条 block 最多补全几个 session 文件
+DEFAULT_MAX_CONTEXTS_PER_FILE = 2       # 每个 session 文件最多取几个上下文片段
+MAX_BLOCK_TEXT_LEN = 200                # block 纯文本最大长度（超出截断）
+MAX_CTX_MSG_LEN = 150                   # 单条 context 消息最大长度
+BLOCK_SEPARATOR = " | "                 # block 之间的分隔符
+CTX_SEPARATOR = " | "                   # context 内部的分组分隔符
+
 
 def get_mem0(collection="mem0_main"):
+    """构建 Mem0 实例"""
     return Memory.from_config({
         "vector_store": {
             "provider": "qdrant",
             "config": {
                 "collection_name": collection,
                 "embedding_model_dims": 1024,
-            "url": "http://localhost:6333"
+                "url": "http://localhost:6333"
             }
         },
         "llm": {
@@ -79,161 +87,225 @@ def get_mem0(collection="mem0_main"):
 
 
 def parse_memory(text):
-    """解析记忆：提取层级、层级定义、分数、文件路径、纯文本"""
-    # 新格式：[层级:Episodic][层级定义:回答请参考...][score:5][distilled][sessions:2][files:/path]
+    """
+    解析记忆 block，提取层级、分数、文件路径、纯文本
+    格式：[层级:Episodic][score:5][distilled][sessions:2][files:/path/a.jsonl,/path/b.jsonl]
+          {block_text}
+    """
+    if not text or not isinstance(text, str):
+        return None
+
+    # 正则提取各字段
     layer_m = re.search(r'\[层级:(\w+)\]', text)
-    layer_def_m = re.search(r'\[层级定义:([^\]]+)\]', text)
     score_m = re.search(r'\[score:(\d+)\]', text)
     files_m = re.search(r'\[files:([^\]]+)\]', text)
 
     layer = layer_m.group(1).lower() if layer_m else "unknown"
-    layer_def = layer_def_m.group(1) if layer_def_m else LAYER_DEFINITIONS.get(layer, "")
-    score = int(score_m.group(1)) if score_m else 3
-    files = [f.strip() for f in files_m.group(1).split(",")] if files_m else []
+    score = int(score_m.group(1)) if score_m else 0
+    files = []
+    if files_m and files_m.group(1).strip():
+        files = [f.strip() for f in files_m.group(1).split(",") if f.strip()]
 
-    # 去掉所有 [xxx] 前缀
+    # 去掉所有 [xxx] 前缀，得到纯文本
     clean = text
-    for _ in range(10):  # 最多10层
+    for _ in range(10):
         stripped = re.sub(r'^\[[^\]]+\]\s*', '', clean)
         if stripped == clean:
             break
         clean = stripped
 
+    clean = clean.strip()
+
     return {
         "layer": layer,
-        "layer_def": layer_def,
+        "layer_def": LAYER_DEFINITIONS.get(layer, ""),
         "score": score,
-        "clean_text": clean.strip(),
+        "clean_text": clean,
         "files": files
     }
 
 
 def lookup_session_snippets(filepath, keyword, max_snippets=6):
-    """在 session 文件中搜索相关片段，返回多轮对话上下文"""
+    """
+    在 session JSONL 文件中搜索相关片段
+    返回格式：[filename]\nicon text\nicon text\n...
+    """
+    if not filepath or not os.path.exists(filepath):
+        return []
+
     snippets = []
-    if not os.path.exists(filepath):
-        return snippets
+    role_icon_map = {
+        "user": "👤",
+        "assistant": "🤖",
+        "toolResult": "🔧"
+    }
 
     try:
-        with open(filepath) as f:
+        with open(filepath, encoding="utf-8") as f:
             lines = f.readlines()
+    except Exception:
+        return []
 
-        # 找包含 keyword 的 message 行
-        relevant_messages = []
-        for i, line in enumerate(lines):
-            if not line.strip():
+    # 解析所有有效消息（user / assistant / toolResult）
+    relevant_messages = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            if obj.get("type") != "message":
                 continue
-            try:
-                obj = json.loads(line)
-                if obj.get("type") == "message":
-                    msg = obj.get("message", {})
-                    role = msg.get("role", "?")
-                    content_arr = msg.get("content", [])
-                    if isinstance(content_arr, list) and content_arr:
-                        text = content_arr[0].get("text", "") if isinstance(content_arr[0], dict) else ""
-                        if keyword and keyword.lower() in text.lower():
-                            relevant_messages.append((i, role, text))
-            except:
+            msg = obj.get("message", {})
+            role = msg.get("role", "")
+            if role not in role_icon_map:
                 continue
 
-        # 如果没找到精确匹配，尝试模糊匹配 block 内容的前20字
-        if not relevant_messages and keyword:
-            block_preview = keyword[:20].lower()
-            for i, line in enumerate(lines):
-                if not line.strip():
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if obj.get("type") == "message":
-                        msg = obj.get("message", {})
-                        content_arr = msg.get("content", [])
-                        if isinstance(content_arr, list) and content_arr:
-                            text = content_arr[0].get("text", "") if isinstance(content_arr[0], dict) else ""
-                            if block_preview in text.lower():
-                                relevant_messages.append((i, msg.get("role", "?"), text))
-                except:
-                    continue
+            # 提取文本内容
+            content_arr = msg.get("content", [])
+            if isinstance(content_arr, list) and content_arr:
+                text = content_arr[0].get("text", "") if isinstance(content_arr[0], dict) else str(content_arr[0])
+            else:
+                text = str(content_arr)
 
-        # 取最近2个相关位置，每个取前后各2条消息
-        for idx, _, _ in relevant_messages[-2:]:
-            start = max(0, idx - 2)
-            end = min(len(lines), idx + 3)
-            context_lines = []
-            for i in range(start, end):
-                line = lines[i].strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if obj.get("type") == "message":
-                        msg = obj.get("message", {})
-                        role = msg.get("role", "?")
-                        content_arr = msg.get("content", [])
-                        if isinstance(content_arr, list) and content_arr:
-                            text = content_arr[0].get("text", "") if isinstance(content_arr[0], dict) else ""
-                            if text:
-                                context_lines.append(f"{role}: {text[:80]}")
-                except:
-                    continue
-            if context_lines:
-                snippets.append(f"[{os.path.basename(filepath)}]\n" + "\n".join(context_lines[:5]))
+            if text:
+                relevant_messages.append({
+                    "role": role,
+                    "text": text[:MAX_CTX_MSG_LEN],  # 截断超长消息
+                    "icon": role_icon_map[role]
+                })
+        except Exception:
+            continue
 
-    except Exception as e:
-        pass
+    if not relevant_messages:
+        return []
 
-    return snippets
+    # 用 keyword 找匹配位置
+    keyword_lower = keyword.lower() if keyword else ""
+    matched_indices = []
+    for i, msg in enumerate(relevant_messages):
+        if keyword_lower and keyword_lower in msg["text"].lower():
+            matched_indices.append(i)
+
+    # 如果没匹配，取最近的消息位置
+    if not matched_indices:
+        matched_indices = [len(relevant_messages) - 1]
+
+    # 收集上下文片段（最多 max_snippets 条）
+    collected = set()
+    for idx in matched_indices[-max_snippets:]:
+        start = max(0, idx - 2)
+        end = min(len(relevant_messages), idx + 3)
+        for i in range(start, end):
+            if i not in collected:
+                msg = relevant_messages[i]
+                collected.add(i)
+                snippets.append(f"{msg['icon']} {msg['text']}")
+
+    if not snippets:
+        return []
+
+    # 组装片段
+    filename = os.path.basename(filepath)
+    return [f"[{filename}]\n" + "\n".join(snippets[:6])]
 
 
-def get_session_context(parsed, max_files=2, max_snippets_per_file=3):
-    """根据 block 中的 files 路径，获取完整的 session 上下文"""
-    contexts = []
+def get_session_context(parsed, max_files=DEFAULT_MAX_FILES_PER_BLOCK, max_snippets_per_file=DEFAULT_MAX_CONTEXTS_PER_FILE):
+    """
+    根据 block 中的 files 路径，补全 session 上下文
+    返回格式：[ctx1, ctx2, ...]
+    """
+    if not parsed or not parsed.get("files"):
+        return []
+
     files = parsed.get("files", [])
-    clean_text = parsed.get("clean_text", "")
+    keyword = parsed.get("clean_text", "")[:20]  # 用前20字做匹配
 
+    contexts = []
     for filepath in files[:max_files]:
-        snippets = lookup_session_snippets(filepath, clean_text[:20], max_snippets=max_snippets_per_file)
-        contexts.extend(snippets)
+        ctx_list = lookup_session_snippets(filepath, keyword, max_snippets=max_snippets_per_file)
+        contexts.extend(ctx_list)
 
     return contexts
 
 
-def format_layer_section(layer, items):
-    """格式化单个层级 section"""
-    icon = LAYER_ICONS.get(layer, "❓")
-    layer_name = LAYER_NAMES_CN.get(layer, "未知层")
-    layer_def = LAYER_DEFINITIONS.get(layer, "")
-
-    lines = [f"\n{icon} **{layer_name}** — {layer_def}"]
-    lines.append("")
-
-    for i, item in enumerate(items):
-        text = item["clean_text"]
-        score = item["score"]
-        lines.append(f"  • {text} [score={score}]")
-
-        # 添加 session 上下文
-        contexts = item.get("contexts", [])
-        if contexts:
-            for ctx in contexts[:2]:  # 最多2个文件
-                ctx_lines = ctx.split("\n")
-                if len(ctx_lines) >= 2:
-                    lines.append(f"    └ {ctx_lines[0]}")  # 文件名
-                    for cl in ctx_lines[1:4]:  # 最多3条消息
-                        if cl.strip():
-                            lines.append(f"      {cl.strip()}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-def auto_recall(query, min_score=2, limit=8):
+def format_recall_output(by_layer):
     """
-    搜索记忆，按层级分组，返回完整上下文
-    返回结构化文本供 AI 塞入 context
+    按层级分组，扁平输出
+    每层定义出现一次，block 之间用 | 分隔
+
+    返回格式：
+    ## 📚 相关记忆
+
+    回答请符合用户偏好、沟通习惯、语言风格：
+      [语义] block1 | ctx1 | ctx2 | [语义] block2 | ctx3
+
+    回答请参考用户的历史决策、重大事件：
+      [事件] block3 | ctx4
     """
+    output_parts = ["## 📚 相关记忆\n"]
+
+    layer_order = ["semantic", "episodic", "procedural"]
+
+    for layer in layer_order:
+        items = by_layer.get(layer, [])
+        if not items:
+            continue
+
+        layer_def = LAYER_DEFINITIONS.get(layer, "")
+        layer_short = LAYER_SHORT_NAMES.get(layer, "未知")
+
+        # 该层定义行（换行结束，不带额外缩进）
+        output_parts.append(f"{layer_def}：\n")
+
+        # 收集所有 block，逐行输出（每条 block 独立一行）
+        for item in items:
+            # 构建 block 文本
+            clean_text = item.get("clean_text", "")
+            if len(clean_text) > MAX_BLOCK_TEXT_LEN:
+                clean_text = clean_text[:MAX_BLOCK_TEXT_LEN] + "..."
+
+            score = item.get("score", 0)
+            line = f"  [{layer_short}]{clean_text} [score={score}]"
+
+            # 补全 session 上下文（内联在 block 后面）
+            contexts = item.get("contexts", [])
+            if contexts:
+                ctx_parts = []
+                for ctx in contexts[:DEFAULT_MAX_CONTEXTS_PER_FILE]:
+                    # ctx 格式: "[filename]\nicon text\nicon text"
+                    ctx_lines = ctx.split("\n")
+                    if len(ctx_lines) >= 2:
+                        header = ctx_lines[0]  # [filename]
+                        body = CTX_SEPARATOR.join(l for l in ctx_lines[1:] if l.strip())
+                        ctx_parts.append(f"{header}: {body}")
+                if ctx_parts:
+                    line += " | " + " | ".join(ctx_parts)
+
+            output_parts.append(f"{line}\n")
+
+        output_parts.append("\n")
+
+    return "".join(output_parts).strip()
+
+
+def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT):
+    """
+    搜索记忆，按层级分组，扁平输出
+
+    Args:
+        query: 搜索关键词
+        min_score: 最低分数阈值
+        limit: 最多返回多少条 block
+
+    Returns:
+        格式化后的记忆文本
+    """
+    # 确定 collection
     agent = os.environ.get("AGENT_NAME", "main")
     collection = f"mem0_{agent}"
 
+    # 向量检索
     try:
         m = get_mem0(collection)
         results = m.search(
@@ -241,9 +313,9 @@ def auto_recall(query, min_score=2, limit=8):
             user_id=os.environ.get("MEM0_USER_ID", "fuge"),
             limit=limit
         )
-        memories = results.get("results", [])
+        memories = results.get("results", []) or []
     except Exception as e:
-        return f"搜索失败: {e}"
+        return f"## 📚 记忆检索失败\n搜索失败: {e}"
 
     if not memories:
         return ""
@@ -251,9 +323,15 @@ def auto_recall(query, min_score=2, limit=8):
     # 解析 + 过滤
     parsed = []
     for mem in memories:
-        p = parse_memory(mem.get("memory", ""))
-        if p["score"] >= min_score:
-            parsed.append(p)
+        text = mem.get("memory", "")
+        if not text:
+            continue
+        p = parse_memory(text)
+        if not p:
+            continue
+        if p["score"] < min_score:
+            continue
+        parsed.append(p)
 
     if not parsed:
         return ""
@@ -261,25 +339,15 @@ def auto_recall(query, min_score=2, limit=8):
     # 按层级分组
     by_layer = defaultdict(list)
     for p in parsed:
-        layer = p.get("layer", "unknown")
-        by_layer[layer].append(p)
+        by_layer[p["layer"]].append(p)
 
-    # 每个 item 补充 session 上下文
+    # 每条 block 补全 session 上下文
     for layer in by_layer:
         for item in by_layer[layer]:
             item["contexts"] = get_session_context(item)
 
     # 格式化输出
-    sections = []
-    for layer in ["semantic", "episodic", "procedural"]:
-        if by_layer[layer]:
-            sections.append(format_layer_section(layer, by_layer[layer]))
-
-    if not sections:
-        return ""
-
-    header = "## 📚 相关记忆（按层级分类）"
-    return header + "\n".join(sections)
+    return format_recall_output(by_layer)
 
 
 if __name__ == "__main__":
@@ -288,8 +356,8 @@ if __name__ == "__main__":
         sys.exit(1)
 
     query = sys.argv[1]
-    min_score = int(sys.argv[2]) if len(sys.argv) > 2 else 2
-    limit = int(sys.argv[3]) if len(sys.argv) > 3 else 8
+    min_score = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_MIN_SCORE
+    limit = int(sys.argv[3]) if len(sys.argv) > 3 else DEFAULT_LIMIT
 
     result = auto_recall(query, min_score=min_score, limit=limit)
     if result:
