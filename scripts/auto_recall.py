@@ -15,10 +15,11 @@ def detect_agent_id_from_workspace():
     """
     从 WORKSPACE_DIR 环境变量推导 agent ID。
     唯一路径：workspace-xxx → xxx，workspace → main
+    如果 WORKSPACE_DIR 未设置，返回 None（让调用方决定 fallback）
     """
     workspace_dir = os.environ.get("WORKSPACE_DIR", "").rstrip("/")
     if not workspace_dir:
-        return "main"
+        return None  # 明确返回 None，让调用方处理 fallback
 
     basename = os.path.basename(workspace_dir)
     if basename.startswith("workspace-"):
@@ -26,7 +27,7 @@ def detect_agent_id_from_workspace():
     elif basename == "workspace":
         return "main"
 
-    return "main"
+    return None  # 未知路径格式，返回 None
 
 _detected_agent_id = None
 
@@ -35,9 +36,9 @@ def get_agent_id():
     global _detected_agent_id
     if _detected_agent_id is not None:
         return _detected_agent_id
-    # 优先用 AGENT_NAME 环境变量（systemd watchdog 场景）
-    # 其次用 WORKSPACE_DIR 路径推导（gateway 场景）
-    _detected_agent_id = os.environ.get("AGENT_NAME", "") or detect_agent_id_from_workspace()
+    # 优先用 WORKSPACE_DIR 路径推导（gateway 场景）
+    # 其次用 AGENT_NAME 环境变量（systemd watchdog 场景）
+    _detected_agent_id = detect_agent_id_from_workspace() or os.environ.get("AGENT_NAME", "main")
     return _detected_agent_id
 
 # === 共享 .env 加载 ===
