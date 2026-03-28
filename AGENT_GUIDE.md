@@ -11,7 +11,7 @@ Mem0 向量记忆系统让你的 AI Agent 拥有**跨会话记住用户偏好和
 ```
 用户对话 → session JSONL 文件 → watch 监控 → sync_to_mem0 写入 → Qdrant 向量数据库
                                               ↓
-              每天 04:00-04:25 分批 distill（memory_distill_daily.py v4）
+              每天 04:00-04:25 分批 distill（memory_distill_daily.py v5）
                                               ↓
                               每天 03:00 cleanup（memory_cleanup.py）
 ```
@@ -22,7 +22,7 @@ Mem0 向量记忆系统让你的 AI Agent 拥有**跨会话记住用户偏好和
 - 🔍 智能检索（每次回复前自动搜索相关记忆）
 - 🔒 多 Agent 隔离（每个 Agent 记忆互不干扰）
 - 📎 来源追溯（每条记忆记录来自哪个 session 文件）
-- ⚡ Per-session 断点续传（v4，不重复处理同一 session）
+- ⚡ Per-session 断点续传（v5，不重复处理同一 session）
 
 ---
 
@@ -161,7 +161,7 @@ cat /root/.openclaw/workspace-capital/.distill_state.json
 | 04:20 | 记忆蒸馏 | xingbu |
 | 04:25 | 记忆蒸馏 | zaochao, zhongshu, shangshu, taizi, hubu, libu |
 
-### memory_distill_daily.py v4 参数
+### memory_distill_daily.py v5 参数
 
 ```bash
 python3 memory_distill_daily.py \
@@ -176,7 +176,7 @@ python3 memory_distill_daily.py \
 
 ### 断点续传逻辑
 
-v4 按 session 文件+行数追踪进度，不再按时间戳：
+v5 按 session 文件+行数追踪进度，不再按时间戳：
 
 ```json
 {

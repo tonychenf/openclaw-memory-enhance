@@ -43,7 +43,8 @@ Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
 - ✅ **自动记忆** — 对话同时自动写入向量库（watch_sessions.js）
 - ✅ **智能检索（v6）** — 扁平分组输出 + session 上下文内联
 - ✅ **多 Agent 支持** — 每个 Agent 独立 collection（`mem0_main` / `mem0_capital` 等）
-- ✅ **Per-session 断点续传** — v4，每个 session 独立记录进度，不重复处理
+- ✅ **Per-session 断点续传** — v5，每个 session 独立记录进度，不重复处理
+- ✅ **Session 蒸馏记录表** — v5，Qdrant 表记录每个 session 蒸馏状态，支持 UUID 追踪（含 .reset 重命名文件）
 - ✅ **每日分批蒸馏** — 17 个 agent 分批在 04:00-04:25 执行
 - ✅ **自动清理** — 凌晨 03:00 清理过期低分记忆
 - ✅ **状态文件隔离** — 各 agent 状态存在各自 workspace
@@ -211,6 +212,19 @@ WORKSPACE_DIR 路径推导 > AGENT_NAME 环境变量 > fallback "main"
 - [飞书文档](https://www.feishu.cn/docx/L0HldmlNSobggfxAohFcRL2nnSh)
 
 ## 更新日志
+
+### v7 (2026-03-28)
+- `auto_recall.py`：Qdrant REST API + layer 过滤，只搜 distilled block
+  - 替换 mem0.search() 为直接 Qdrant API
+  - Realtime sync 数据（无 layer 字段）被过滤，不再干扰结果
+
+### v5 (2026-03-28)
+- **Session 蒸馏记录表**：新增 `distill_session_records` collection（Qdrant）
+  - 字段：`session_id`（UUID）| `agent_id` | `remark_1` | `remark_2` | `remark_3`
+  - 蒸馏前查表：已蒸馏则跳过，未蒸馏则处理
+  - 支持 `.reset.TIMESTAMP` 重命名文件的 UUID 追溯
+  - 替换 V4 的 per-session 状态文件为 Qdrant 统一记录表
+- `memory_distill_daily.py` v5：整合蒸馏记录表 + 断点续传
 
 ### v4 (2026-03-28)
 - Per-session 断点续传：每个 session 独立记录已处理行数
