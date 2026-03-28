@@ -218,6 +218,8 @@ WORKSPACE_DIR 路径推导 > AGENT_NAME 环境变量 > fallback "main"
   - Step 4：**加载整个 session 文件**（移除 keyword 匹配，直接读取完整内容）
   - Step 5：**加载当前 session + 24h 内 realtime 对话**
   - 修复 `get_current_session_path()`：sessions.json 结构为 `updatedAt` 最大 = 最新 session
+  - 新增 `--agent` 参数：显式指定 agent，避免 exec 场景下 agent 识别错误
+  - 用法：`python3 auto_recall.py "关键词" --agent ops`
   - 召回输出 = 历史蒸馏记忆 + 当前实时对话
 
 ### v7 (2026-03-28)
