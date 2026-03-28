@@ -5,10 +5,9 @@ auto_recall - 自动记忆读取（v8）
 - 分组扁平输出：每层定义出现一次，block 用 | 分隔
 - 严谨性：边界条件，空值、异常全面处理
 - 可拓展性：层级定义外部化、输出格式可配置、session 上下文策略可扩展
-- v8: Step 4完整session + Step 5 realtime + Step 6全量session
+- v8: Step 4完整session + Step 5 realtime
   - Step 4: 加载整个 session 文件（无 keyword 匹配）
-  - Step 5: 加载 24h 内 realtime 对话
-  - Step 6: 加载当前活跃 session 全量内容
+  - Step 5: 加载当前 session + 24h 内 realtime 对话
 """
 import os, sys, re, json, time
 from datetime import datetime, timedelta, timezone
@@ -286,55 +285,6 @@ def get_current_session_path():
     return None
 
 
-def get_full_session_context(agent):
-    """
-    Step 6: 加载当前活跃 session 的完整内容（全量，不截断）
-
-    不再限制 max_msgs，返回整个 session 文件的全部消息。
-    用于需要完整对话历史的场景。
-
-    返回格式：[full session file]\nicon text\nicon text\n...
-    """
-    current_session = get_current_session_path()
-    if not current_session:
-        return []
-
-    role_icon_map = {"user": "👤", "assistant": "🤖", "toolResult": "🔧"}
-    messages = []
-    try:
-        with open(current_session, encoding="utf-8") as f:
-            lines = f.readlines()
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                if obj.get("type") != "message":
-                    continue
-                msg = obj.get("message", {})
-                role = msg.get("role", "")
-                if role not in role_icon_map:
-                    continue
-                content_arr = msg.get("content", [])
-                if isinstance(content_arr, list) and content_arr:
-                    text = content_arr[0].get("text", "") if isinstance(content_arr[0], dict) else str(content_arr[0])
-                else:
-                    text = str(content_arr)
-                if text:
-                    messages.append(f"{role_icon_map[role]} {text}")
-            except Exception:
-                continue
-    except Exception:
-        return []
-
-    if not messages:
-        return []
-
-    filename = os.path.basename(current_session)
-    return [f"[{filename} (全量 {len(messages)} 条)]\n" + "\n".join(messages)]
-
-
 def get_realtime_context(agent, max_msgs=30):
     """
     Step 5: 加载向量库中最近 24 小时的 realtime 对话
@@ -547,11 +497,8 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT):
         for item in by_layer[layer]:
             item["contexts"] = get_session_context(item)
 
-    # Step 5: 加载 realtime context（24h 内实时对话）
+    # Step 5: 加载 realtime context（当前 session + 24h 内 Qdrant 实时）
     realtime_contexts = get_realtime_context(agent)
-
-    # Step 6: 加载当前活跃 session 全量内容
-    full_session = get_full_session_context(agent)
 
     # 格式化输出
     output = format_recall_output(by_layer)
@@ -560,11 +507,6 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT):
     if realtime_contexts:
         output += "\n\n--- 当前实时对话 ---\n\n"
         output += "\n\n".join(realtime_contexts)
-
-    # 追加全量 session
-    if full_session:
-        output += "\n\n--- 当前 Session 全量 ---\n\n"
-        output += "\n\n".join(full_session)
 
     return output
 
