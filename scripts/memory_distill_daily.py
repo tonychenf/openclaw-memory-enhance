@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-每日记忆精炼脚本 - v4 (per-session checkpoint)
+每日记忆精炼脚本 - v5 (session 蒸馏记录表)
 将 session 文件中的对话蒸馏成结构化记忆 blocks，评分后写入 Qdrant
 
-改进点 v4:
-- Per-session 断点续传：每个 session 文件独立记录已处理行数
-- 不再重复处理同一 session 的历史对话
-- 状态文件存在各 agent 自 workspace 中
-- 自动迁移旧格式状态
+改进点 v5:
+- 新增 distill_session_records 表（Qdrant），记录每个 session 的蒸馏状态
+- 每次蒸馏前查表：已蒸馏则跳过，未蒸馏则处理
+- session_id = UUID（从文件名提取，支持 .reset.TIMESTAMP 重命名）
+- 替换 V4 的 per-session 状态文件为 Qdrant 记录表
 """
 import os, sys, re, json, time, argparse, requests
 from datetime import datetime, timedelta
@@ -16,6 +16,20 @@ from pathlib import Path
 SESSIONS_DIR = "/root/.openclaw/agents/main/sessions"
 STATE_FILE = "/root/.openclaw/workspace/.distill_state.json"
 COLLECTION = "mem0_main"
+RECORD_COLLECTION = "distill_session_records"
+
+# ========== 公共变量 ==========
+_API_KEY = None
+_BASE_URL = "https://api.siliconflow.cn/v1"
+
+def _get_api_key():
+    global _API_KEY
+    if _API_KEY is None:
+        os.environ["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", "")
+        if not os.environ.get("OPENAI_API_KEY"):
+            print("ERROR: set OPENAI_API_KEY"); sys.exit(1)
+        _API_KEY = os.environ["OPENAI_API_KEY"]
+    return _API_KEY
 
 # ========== 配置 ==========
 def get_config():
@@ -30,8 +44,7 @@ def get_config():
     args = parser.parse_args()
 
     agent = args.agent
-    
-    # 状态文件路径：各 agent 存在各自 workspace
+
     if agent == "main":
         state_file = f"/root/.openclaw/workspace/.distill_state.json"
     else:
@@ -51,7 +64,6 @@ def get_config():
     }
 
 def get_state_path(cfg):
-    """获取状态文件路径，确保目录存在"""
     state_file = cfg["state_file"]
     state_dir = os.path.dirname(state_file)
     if state_dir and not os.path.exists(state_dir):
@@ -60,11 +72,9 @@ def get_state_path(cfg):
 
 # ========== 状态管理 ==========
 def load_state(state_file):
-    """加载状态，自动迁移旧格式"""
     if os.path.exists(state_file):
         with open(state_file) as f:
             state = json.load(f)
-        # 旧格式迁移：{"last_distilled_at": "..."} -> {"sessions": {}, "global_last_run": "..."}
         if "last_distilled_at" in state and "sessions" not in state:
             print(f"[迁移] 检测到旧格式状态文件，自动迁移到新格式")
             old_ts = state["last_distilled_at"]
@@ -74,52 +84,174 @@ def load_state(state_file):
                 "migrated_from_timestamp": True,
                 "migrated_at": datetime.now().isoformat()
             }
-            # 写回新格式
             save_state(state, state_file)
             print(f"[迁移] 已迁移，last_distilled_at={old_ts}")
         return state
     return {"sessions": {}, "global_last_run": None}
 
 def save_state(state, state_file):
-    """保存状态"""
     state_file = get_state_path({"state_file": state_file})
     with open(state_file, 'w') as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-def cleanup_stale_sessions(state, sessions_dir, days=30):
-    """清理超过N天未活跃的 session 记录"""
-    cutoff = datetime.now() - timedelta(days=days)
-    cleaned = []
-    sessions = state.get("sessions", {})
-    
-    for fname, info in list(sessions.items()):
-        distilled_at = info.get("distilled_at")
-        if not distilled_at:
-            continue
-        try:
-            dt = datetime.fromisoformat(distilled_at)
-            if dt < cutoff:
-                del sessions[fname]
-                cleaned.append(fname)
-        except:
-            pass
-    
-    if cleaned:
-        print(f"[清理] 移除 {len(cleaned)} 个过期 session 记录: {cleaned}")
-    return state, cleaned
-
-# ========== Session 文件扫描（断点续传） ==========
-def get_session_with_progress(sessions_dir, state, force=False):
+# ========== Session UUID 提取 ==========
+def extract_session_uuid(filepath):
     """
-    返回需要处理的 session 文件列表及其起始行数
-    
-    Returns:
-        list of (filepath, start_line) — start_line 为已处理行数（下次从该行之后继续）
+    从 session 文件路径提取 UUID。
+    处理两种情况：
+    - 正常：/path/1589659c-8407-406a-a383-5dc74a7335c3.jsonl
+    - 重命名：/path/20889554-a992-4a5c-8832-1ed138489174.jsonl.reset.2026-03-25T22-11-30.587Z
+    返回：(uuid_str, is_renamed)
+    """
+    fname = Path(filepath).name
+    # 去掉 .reset.TIMESTAMP 后缀
+    if ".reset." in fname:
+        base = fname.split(".reset.")[0]
+        is_renamed = True
+    else:
+        base = fname
+        is_renamed = False
+    # 去掉 .jsonl 后缀
+    uuid_str = base.replace(".jsonl", "").replace(".jsonl.reset", "")
+    return uuid_str, is_renamed
+
+# ========== 蒸馏记录表（Qdrant） ==========
+def ensure_record_collection():
+    """确保 distill_session_records collection 存在"""
+    url = "http://localhost:6333/collections"
+    resp = requests.get(f"{url}/{RECORD_COLLECTION}")
+    if resp.status_code == 200:
+        return
+    # 不存在，创建
+    create_payload = {
+        "name": RECORD_COLLECTION,
+        "vectors": {"size": 1024, "distance": "Cosine"}
+    }
+    r = requests.put(url, json=create_payload)
+    if r.status_code not in (200, 201):
+        print(f"[WARN] 无法创建 collection {RECORD_COLLECTION}: {r.text}")
+
+def is_session_distilled(session_id):
+    """检查某 session 是否已被蒸馏过"""
+    url = f"http://localhost:6333/collections/{RECORD_COLLECTION}/points/search"
+    body = {
+        "vector": [0.0] * 1024,  # dummy vector, filter only
+        "limit": 1,
+        "with_payload": True,
+        "filter": {
+            "must": [
+                {"key": "session_id", "match": {"value": session_id}}
+            ]
+        }
+    }
+    try:
+        resp = requests.post(url, headers={"Content-Type": "application/json"}, json=body)
+        result = resp.json()
+        if result.get("result"):
+            return True
+        return False
+    except:
+        return False
+
+def batch_check_sessions(session_ids):
+    """
+    批量检查多个 session 是否已被蒸馏。
+    返回 set of already_distilled session_ids。
+    """
+    if not session_ids:
+        return set()
+
+    url = f"http://localhost:6333/collections/{RECORD_COLLECTION}/points/search"
+    body = {
+        "vector": [0.0] * 1024,
+        "limit": len(session_ids),
+        "with_payload": True,
+        "filter": {
+            "must": [
+                {"key": "session_id", "match": {"any": list(session_ids)}}
+            ]
+        }
+    }
+    try:
+        resp = requests.post(url, headers={"Content-Type": "application/json"}, json=body)
+        result = resp.json()
+        found = set()
+        for p in result.get("result", []):
+            sid = p.get("payload", {}).get("session_id", "")
+            if sid:
+                found.add(sid)
+        return found
+    except Exception as e:
+        print(f"[WARN] 批量检查 session 失败: {e}")
+        return set()
+
+def add_distilled_record(session_id, agent_id):
+    """
+    将 session 标记为已蒸馏（写入 Qdrant 记录表）。
+    使用 session_id 的 hash 作为 point ID（幂等）。
+    """
+    import hashlib
+    point_id = hashlib.md5(f"{agent_id}:{session_id}".encode()).hexdigest()
+    payload = {
+        "session_id": session_id,
+        "agent_id": agent_id,
+        "remark_1": "",
+        "remark_2": "",
+        "remark_3": "",
+        "distilled_at": datetime.now().isoformat()
+    }
+    url = f"http://localhost:6333/collections/{RECORD_COLLECTION}/points"
+    body = {
+        "points": [{"id": point_id, "vector": [0.0] * 1024, "payload": payload}]
+    }
+    try:
+        requests.put(url, headers={"Content-Type": "application/json"}, json=body)
+    except Exception as e:
+        print(f"[WARN] 写入 session 记录失败: {e}")
+
+# ========== Session 文件扫描 ==========
+def get_session_files_with_uuid(sessions_dir):
+    """
+    扫描 sessions 目录，返回所有 session 文件的 UUID 信息。
+    返回：dict {uuid_str: (filepath, is_renamed)}
     """
     p = Path(sessions_dir)
     if not p.exists():
+        return {}
+    result = {}
+    for f in p.glob("*.jsonl"):
+        uuid_str, is_renamed = extract_session_uuid(str(f))
+        result[uuid_str] = (str(f), is_renamed)
+    return result
+
+def get_session_with_progress(sessions_dir, state, agent, force=False):
+    """
+    返回需要处理的 session 文件列表。
+
+    v5 改进：
+    - 先查 distill_session_records 表，过滤已蒸馏的 session
+    - 再用 per-session 状态文件做行数断点续传
+
+    Returns:
+        list of (filepath, uuid_str, start_line)
+    """
+    # 1. 扫描所有 session 文件，提取 UUID
+    all_sessions = get_session_files_with_uuid(sessions_dir)
+    if not all_sessions:
         return []
-    
+
+    # 2. 批量查记录表，过滤已蒸馏的
+    all_uuids = set(all_sessions.keys())
+    already_distilled = batch_check_sessions(all_uuids)
+    new_uuids = all_uuids - already_distilled
+
+    if not new_uuids and not force:
+        print(f"[记录表] 所有 {len(already_distilled)} 个 session 均已蒸馏，跳过全量检查")
+        return []
+
+    print(f"[记录表] 共 {len(all_uuids)} 个 session，其中 {len(already_distilled)} 个已蒸馏，{len(new_uuids)} 个待处理")
+
+    # 3. 读取 per-session 状态文件（用于行数断点）
     sessions_state = state.get("sessions", {})
     global_last_run = state.get("global_last_run")
     if global_last_run:
@@ -129,41 +261,41 @@ def get_session_with_progress(sessions_dir, state, force=False):
             last_run_dt = None
     else:
         last_run_dt = None
-    
+
     result = []
-    
-    for f in p.glob("*.jsonl"):
-        fname = f.name
-        current_lines = count_lines(f)
-        
-        if fname in sessions_state:
-            # 已有记录：检查是否有增量
-            processed_lines = sessions_state[fname].get("processed_lines", 0)
+    for uuid_str, (filepath, is_renamed) in all_sessions.items():
+        # 已蒸馏但无增量 → 跳过
+        if uuid_str in already_distilled and not force:
+            if is_renamed:
+                print(f"[记录表] {uuid_str} (已重命名) 已蒸馏，跳过")
+            continue
+
+        # 新 session 或 force
+        current_lines = count_lines(filepath)
+
+        if uuid_str in sessions_state:
+            # per-session 状态有记录 → 断点续传
+            processed_lines = sessions_state[uuid_str].get("processed_lines", 0)
             if current_lines > processed_lines:
-                result.append((str(f), processed_lines))
-                # 更新总行数（便于后续追踪）
-                sessions_state[fname]["current_lines"] = current_lines
+                result.append((filepath, uuid_str, processed_lines))
             else:
-                # 无增量，跳过
+                # 无增量
                 pass
         else:
-            # 新 session 或 force 模式
+            # 没有任何记录
             if force:
-                result.append((str(f), 0))
+                result.append((filepath, uuid_str, 0))
             elif last_run_dt:
-                # 只处理 global_last_run 之后修改的文件
-                mtime = datetime.fromtimestamp(f.stat().st_mtime)
+                # 只处理 global_last_run 之后修改的
+                mtime = datetime.fromtimestamp(Path(filepath).stat().st_mtime)
                 if mtime > last_run_dt:
-                    result.append((str(f), 0))
-                # 否则跳过（认为没有新内容）
+                    result.append((filepath, uuid_str, 0))
             else:
-                # 没有任何记录，当新文件处理
-                result.append((str(f), 0))
-    
+                result.append((filepath, uuid_str, 0))
+
     return result
 
 def count_lines(filepath):
-    """快速统计文件行数"""
     try:
         with open(filepath, 'rb') as f:
             return sum(1 for _ in f)
@@ -171,7 +303,6 @@ def count_lines(filepath):
         return 0
 
 def read_sessions_from_file(filepath, start_line=0):
-    """读取指定文件的对话，从 start_line 之后开始读取"""
     conversations = []
     with open(filepath) as fp:
         for i, line in enumerate(fp):
@@ -192,8 +323,8 @@ def read_sessions_from_file(filepath, start_line=0):
                         clean = extract_user_content(content) if role == "user" else content.strip()
                         if clean and len(clean) > 5:
                             conversations.append({
-                                "session": Path(filepath).name, 
-                                "role": role, 
+                                "session": Path(filepath).name,
+                                "role": role,
                                 "content": clean[:500]
                             })
             except:
@@ -209,7 +340,6 @@ def extract_user_content(text):
     return text.strip()
 
 def distill_batch(conversations_batch, llm_client):
-    """蒸馏一批对话，返回 block 列表"""
     if not conversations_batch:
         return []
     sessions = list(set(c["session"] for c in conversations_batch))
@@ -250,7 +380,6 @@ def distill_batch(conversations_batch, llm_client):
         return []
 
 def parse_distilled_blocks(text):
-    """解析带层级分类的block文本"""
     pattern = re.compile(
         r'\[层级:(\w+)\]\s*\n*([\s\S]+?)(?=\[层级:|$)',
         re.MULTILINE | re.DOTALL
@@ -264,7 +393,6 @@ def parse_distilled_blocks(text):
     return results
 
 def distill_conversations_batched(conversations, llm_client, batch_size=80):
-    """分批蒸馏，合并结果"""
     all_blocks = []
     total_batches = (len(conversations) + batch_size - 1) // batch_size
     print(f"  共 {len(conversations)} 条对话，分 {total_batches} 批处理（每批 {batch_size} 条）")
@@ -281,23 +409,22 @@ def distill_conversations_batched(conversations, llm_client, batch_size=80):
     return all_blocks
 
 def score_blocks(blocks_with_layers, llm_client, batch_size=30):
-    """对 blocks 评分，保持层级信息（批量处理避免 prompt 过长）"""
     if not blocks_with_layers:
         return []
-    
+
     scored = []
     total_batches = (len(blocks_with_layers) + batch_size - 1) // batch_size
     print(f"  分 {total_batches} 批评分（每批 {batch_size} 条）")
-    
+
     for batch_idx in range(total_batches):
         start = batch_idx * batch_size
         end = min(start + batch_size, len(blocks_with_layers))
         batch = blocks_with_layers[start:end]
-        
+
         texts = [b[0] for b in batch]
         sessions_all = [b[1] for b in batch]
         layers = [b[2] for b in batch]
-        
+
         prompt = """以下是从对话中提炼的记忆 block，请对每个评分（1-5分，5分最重要）：
 1分：闲聊、无关内容
 2分：一般信息
@@ -333,12 +460,11 @@ block列表：
             print(f"    第{batch_idx+1}批：评分了 {batch_scored} 个")
         except Exception as e:
             print(f"    第{batch_idx+1}批 LLM 错误: {e}")
-    
+
     print(f"  共评分了 {len(scored)} 个 blocks")
     return scored
 
 def write_blocks(blocks_with_scores, qdrant_client, embed_api_key, agent, collection, min_score=3):
-    """手动生成向量并直接写入 Qdrant"""
     import uuid, requests
 
     written = 0
@@ -397,53 +523,45 @@ def main():
     dry_run = cfg["dry_run"]
     force = cfg["force"]
     batch_size = cfg["batch_size"]
-    cleanup_days = cfg["days"] if cfg.get("cleanup") else None
 
-    os.environ["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", "")
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("ERROR: set OPENAI_API_KEY"); sys.exit(1)
-
+    os.environ["OPENAI_API_KEY"] = _get_api_key()
     from qdrant_client import QdrantClient
     from openai import OpenAI
 
-    API_KEY = os.environ["OPENAI_API_KEY"]
-    BASE_URL = "https://api.siliconflow.cn/v1"
+    API_KEY = _get_api_key()
+    BASE_URL = _BASE_URL
     client_llm = OpenAI(api_key=API_KEY, base_url=BASE_URL)
     qdrant_client = QdrantClient(url="http://localhost:6333")
 
     print(f"[Agent: {agent}] Collection: {collection}  Sessions: {sessions_dir}")
     print(f"[State] {state_file}")
 
+    # v5: 确保记录表存在
+    ensure_record_collection()
+
     state = load_state(state_file)
-    
-    # 清理过期 session 记录
-    if cleanup_days:
-        state, cleaned = cleanup_stale_sessions(state, sessions_dir, days=cleanup_days)
-        save_state(state, state_file)
 
     # 获取需要处理的文件及起始行
-    files_to_process = get_session_with_progress(sessions_dir, state, force=force)
-    
+    files_to_process = get_session_with_progress(sessions_dir, state, agent, force=force)
+
     if not files_to_process:
         print("没有需要处理的 session 文件")
         return
 
     print(f"发现 {len(files_to_process)} 个 session 需要处理")
-    
-    # 统计总对话数
+
     total_convs = 0
-    for filepath, start_line in files_to_process:
+    for filepath, uuid_str, start_line in files_to_process:
         convs = read_sessions_from_file(filepath, start_line)
         total_convs += len(convs)
-        print(f"  {Path(filepath).name}: 从第{start_line}行开始，{len(convs)}条新对话")
+        print(f"  {Path(filepath).name} (uuid={uuid_str}): 从第{start_line}行开始，{len(convs)}条新对话")
 
     if total_convs == 0:
         print("没有新对话可处理")
         return
 
-    # 读取所有对话
     all_convs = []
-    for filepath, start_line in files_to_process:
+    for filepath, uuid_str, start_line in files_to_process:
         convs = read_sessions_from_file(filepath, start_line)
         all_convs.extend(convs)
 
@@ -485,23 +603,24 @@ def main():
 
     print("写入 mem0...")
     written = write_blocks(to_store, qdrant_client, API_KEY, agent, collection)
-    
-    # 更新状态：每个 session 的处理进度
+
+    # v5: 将每个处理的 session 写入蒸馏记录表
     now = datetime.now().isoformat()
-    for filepath, start_line in files_to_process:
-        fname = Path(filepath).name
+    for filepath, uuid_str, start_line in files_to_process:
+        add_distilled_record(uuid_str, agent)
+        # 同时更新 per-session 状态
         current_lines = count_lines(filepath)
-        if fname not in state.get("sessions", {}):
-            state.setdefault("sessions", {})
-        state["sessions"][fname] = {
+        if "sessions" not in state:
+            state["sessions"] = {}
+        state["sessions"][uuid_str] = {
             "processed_lines": current_lines,
             "distilled_at": now,
             "current_lines": current_lines
         }
-    
+
     state["global_last_run"] = now
     save_state(state, state_file)
-    
+
     print(f"\n完成！写入 {written} 条")
     print(f"状态已更新: {len(files_to_process)} 个 session")
 
