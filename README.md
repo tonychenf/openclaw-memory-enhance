@@ -33,18 +33,20 @@ Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
 - 🔍 **智能检索** — 每次回复前自动读取相关记忆
 - 🔒 **多 Agent 隔离** — 每个 Agent 记忆完全隔离
 - 📎 **来源追溯** — 每条记忆记录来自哪个 session 文件
+- ⚡ **断点续传** — Per-session 独立记录已处理行数，不重复处理
 
 ## 功能
 
 - ✅ **一键安装** — `bash install.sh` 搞定全部
 - ✅ **智能检测** — 自动识别已安装组件，不重复安装
 - ✅ **多 Agent 自动配置** — 自动检测所有 Agent 并批量配置
-- ✅ **自动记忆** — 对话同时自动写入向量库
+- ✅ **自动记忆** — 对话同时自动写入向量库（watch_sessions.js）
 - ✅ **智能检索（v6）** — 扁平分组输出 + session 上下文内联
 - ✅ **多 Agent 支持** — 每个 Agent 独立 collection（`mem0_main` / `mem0_capital` 等）
-- ✅ **systemd 自启** — 开机自动运行
-- ✅ **每日蒸馏** — 凌晨 4 点自动将对话蒸馏为精华 block
-- ✅ **自动清理** — 凌晨 3 点自动删除过期低分记忆
+- ✅ **Per-session 断点续传** — v4，每个 session 独立记录进度，不重复处理
+- ✅ **每日分批蒸馏** — 17 个 agent 分批在 04:00-04:25 执行
+- ✅ **自动清理** — 凌晨 03:00 清理过期低分记忆
+- ✅ **状态文件隔离** — 各 agent 状态存在各自 workspace
 
 ## 系统架构
 
@@ -65,7 +67,7 @@ Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
 └─────────────┘    │ auto_recall  │    └─────────────┘
                    └──────────────┘
                           ▲
-                          │ 每天 04:00 distill（memory_distill_daily.py）
+                          │ 每天 04:00-04:25 分批 distill（memory_distill_daily.py v4）
                           │ 每天 03:00 cleanup（memory_cleanup.py）
 ```
 
@@ -77,11 +79,44 @@ Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
 
 | 脚本 | 功能 | 触发方式 |
 |------|------|---------|
-| `watch_sessions.js` | 监听 session 目录变化 | systemd 服务 |
+| `watch_sessions.js` | 监听 session 目录变化 | node 进程（自启动） |
 | `sync_to_mem0.py` | 将对话实时写入 Qdrant | watch 调用 |
 | `auto_recall.py` | 检索记忆 + session 上下文 | 每次回复前 |
-| `memory_distill_daily.py` | 每日蒸馏精华 block | cron（每天 04:00） |
+| `memory_distill_daily.py` | 每日蒸馏精华 block（v4） | cron（每天 04:00-04:25） |
 | `memory_cleanup.py` | 清理过期低分记忆 | cron（每天 03:00） |
+
+## Per-Session 断点续传（v4）
+
+`memory_distill_daily.py` v4 实现 Per-Session 独立进度：
+
+```json
+{
+  "sessions": {
+    "7c86da32-ea18-4a3a-90b7-5d65bb1c2f53.jsonl": {
+      "processed_lines": 142,
+      "distilled_at": "2026-03-28T04:30:19"
+    }
+  },
+  "global_last_run": "2026-03-28T04:35:00"
+}
+```
+
+**优势**：
+- 同一 session 的新消息不会被重复蒸馏
+- 每个 session 独立追踪进度
+- 状态文件存在各 agent 自己的 workspace
+
+## Cron 任务分批时间表
+
+| 时间 | 任务 | Agent |
+|------|------|-------|
+| 03:00 | 记忆清理（main） | main |
+| 04:00 | 记忆蒸馏 | main, capital, dev |
+| 04:05 | 记忆蒸馏 | bingbu, gongbu |
+| 04:10 | 记忆蒸馏 | legal, ops |
+| 04:15 | 记忆蒸馏 | libu_hr, menxia, rich |
+| 04:20 | 记忆蒸馏 | xingbu |
+| 04:25 | 记忆蒸馏 | zaochao, zhongshu, shangshu, taizi, hubu, libu |
 
 ## 评分规则
 
@@ -97,7 +132,6 @@ Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
 ### 1. 配置环境变量
 
 ```bash
-# .env 文件位于：/root/.openclaw/mem0-agent-setup/.env（所有 Agent 共用）
 cp scripts/config.env.example /root/.openclaw/mem0-agent-setup/.env
 vim /root/.openclaw/mem0-agent-setup/.env
 # 必须设置：OPENAI_API_KEY
@@ -126,8 +160,11 @@ bash install.sh --uninstall-all
 # 搜索记忆
 python3 scripts/auto_recall.py "关键词"
 
-# 查看记忆数量
-python3 scripts/mem0-agent.py stats
+# 手动触发 distill（dry run）
+python3 scripts/memory_distill_daily.py --agent main --dry-run --yes
+
+# 手动触发 cleanup
+python3 scripts/memory_cleanup.py 30
 ```
 
 ## Agent ID 检测
@@ -138,51 +175,53 @@ auto_recall.py 自动检测当前 agent，优先级：
 WORKSPACE_DIR 路径推导 > AGENT_NAME 环境变量 > fallback "main"
 ```
 
-示例：
-- `WORKSPACE_DIR=/root/.openclaw/workspace-capital` → agent = `capital`
-- `WORKSPACE_DIR=/root/.openclaw/workspace` → agent = `main`
-- `AGENT_NAME=capital`（systemd watchdog 设置）
+## 多 Agent 配置（17 个 Agent）
 
-## 多 Agent 配置
+| Agent | Collection | 状态文件位置 |
+|-------|------------|-------------|
+| main | `mem0_main` | `/root/.openclaw/workspace/.distill_state.json` |
+| capital | `mem0_capital` | `/root/.openclaw/workspace-capital/.distill_state.json` |
+| dev | `mem0_dev` | `/root/.openclaw/workspace-dev/.distill_state.json` |
+| legal | `mem0_legal` | `/root/.openclaw/workspace-legal/.distill_state.json` |
+| ops | `mem0_ops` | `/root/.openclaw/workspace-ops/.distill_state.json` |
+| bingbu | `mem0_bingbu` | 各 workspace |
+| hubu | `mem0_hubu` | 各 workspace |
+| gongbu | `mem0_gongbu` | 各 workspace |
+| libu | `mem0_libu` | 各 workspace |
+| libu_hr | `mem0_libu_hr` | 各 workspace |
+| menxia | `mem0_menxia` | 各 workspace |
+| rich | `mem0_rich` | 各 workspace |
+| shangshu | `mem0_shangshu` | 各 workspace |
+| taizi | `mem0_taizi` | 各 workspace |
+| xingbu | `mem0_xingbu` | 各 workspace |
+| zaochao | `mem0_zaochao` | 各 workspace |
+| zhongshu | `mem0_zhongshu` | 各 workspace |
 
-| Agent | Collection | 说明 |
-|-------|------------|------|
-| main | `mem0_main` | 主 Agent |
-| capital | `mem0_capital` | 量化 Agent |
-| dev | `mem0_dev` | 开发 Agent |
-
-每个 Agent 的 systemd 服务：
-- `openclaw-session-watch-main`
-- `openclaw-session-watch-capital`
-- `openclaw-session-watch-dev`
+所有 17 个 agent 的 watch_sessions.js 进程均已启动并运行中。
 
 ## 系统要求
 
 - Linux (Ubuntu 20.04+)
 - Python 3.8+
-- Docker（Qdrant 向量数据库）
+- Docker（Qdrant 向量数据库，运行于 localhost:6333）
 
 ## 文档
 
 - [AGENT_GUIDE.md](AGENT_GUIDE.md) — AI Agent 配置指引
 - [飞书文档](https://www.feishu.cn/docx/L0HldmlNSobggfxAohFcRL2nnSh)
 
-## 日志目录
+## 更新日志
 
-每次 cron 执行自动记录到日志文件：
+### v4 (2026-03-28)
+- Per-session 断点续传：每个 session 独立记录已处理行数
+- 状态文件改为各 agent 自己的 workspace
+- 新增 `--cleanup` 参数
+- Cron 分批时间表（17 agent 分 6 批，04:00-04:25）
 
-| 日志位置 | 内容 |
-|---------|------|
-| `/root/.openclaw/cron_log/cleanup_{agent}.log` | cleanup START/END 标记 + 脚本输出 |
-| `/root/.openclaw/cron_log/distill_{agent}.log` | distill START/END 标记 + 脚本输出 |
-| `/root/.openclaw/workspace/logs/distill_{agent}.log` | distill 详细输出（每批处理、blocks 生成情况） |
-
-日志格式：
-```
-2026-03-26 03:00:12 CLEANUP main START
-没有记忆需要清理
-2026-03-26 03:00:15 CLEANUP main END
-```
+### v3 (2026-03-26)
+- 支持 17 个 agent 同时蒸馏
+- 批量处理优化
+- 新增每日分批执行
 
 ## License
 

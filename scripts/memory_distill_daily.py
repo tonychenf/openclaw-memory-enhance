@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-每日记忆精炼脚本 - v3 (batched)
+每日记忆精炼脚本 - v4 (per-session checkpoint)
 将 session 文件中的对话蒸馏成结构化记忆 blocks，评分后写入 Qdrant
+
+改进点 v4:
+- Per-session 断点续传：每个 session 文件独立记录已处理行数
+- 不再重复处理同一 session 的历史对话
+- 状态文件存在各 agent 自 workspace 中
+- 自动迁移旧格式状态
 """
 import os, sys, re, json, time, argparse, requests
 from datetime import datetime, timedelta
@@ -20,73 +26,187 @@ def get_config():
     parser.add_argument("--force", action="store_true", help="强制全量处理")
     parser.add_argument("--yes", action="store_true", help="跳过确认直接写入")
     parser.add_argument("--batch-size", type=int, default=80, help="每批处理多少条对话（默认80）")
+    parser.add_argument("--cleanup", action="store_true", help="清理超过N天未活跃的session记录（需配合 --days 指定天数）")
     args = parser.parse_args()
 
     agent = args.agent
+    
+    # 状态文件路径：各 agent 存在各自 workspace
+    if agent == "main":
+        state_file = f"/root/.openclaw/workspace/.distill_state.json"
+    else:
+        state_file = f"/root/.openclaw/workspace-{agent}/.distill_state.json"
+
     return {
         "sessions_dir": f"/root/.openclaw/agents/{agent}/sessions",
         "collection": f"mem0_{agent}",
-        "state_file": f"/root/.openclaw/workspace/.distill_state_{agent}.json",
+        "state_file": state_file,
         "agent": agent,
         "dry_run": args.dry_run,
         "force": args.force,
         "days": args.days,
         "batch_size": args.batch_size,
         "yes": args.yes,
+        "cleanup": args.cleanup,
     }
-# ==========================
 
+def get_state_path(cfg):
+    """获取状态文件路径，确保目录存在"""
+    state_file = cfg["state_file"]
+    state_dir = os.path.dirname(state_file)
+    if state_dir and not os.path.exists(state_dir):
+        os.makedirs(state_dir, exist_ok=True)
+    return state_file
+
+# ========== 状态管理 ==========
 def load_state(state_file):
+    """加载状态，自动迁移旧格式"""
     if os.path.exists(state_file):
         with open(state_file) as f:
-            return json.load(f)
-    return {"last_distilled_at": None}
+            state = json.load(f)
+        # 旧格式迁移：{"last_distilled_at": "..."} -> {"sessions": {}, "global_last_run": "..."}
+        if "last_distilled_at" in state and "sessions" not in state:
+            print(f"[迁移] 检测到旧格式状态文件，自动迁移到新格式")
+            old_ts = state["last_distilled_at"]
+            state = {
+                "sessions": {},
+                "global_last_run": old_ts,
+                "migrated_from_timestamp": True,
+                "migrated_at": datetime.now().isoformat()
+            }
+            # 写回新格式
+            save_state(state, state_file)
+            print(f"[迁移] 已迁移，last_distilled_at={old_ts}")
+        return state
+    return {"sessions": {}, "global_last_run": None}
 
 def save_state(state, state_file):
+    """保存状态"""
+    state_file = get_state_path({"state_file": state_file})
     with open(state_file, 'w') as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-def get_session_files(sessions_dir, since_dt):
-    files = []
+def cleanup_stale_sessions(state, sessions_dir, days=30):
+    """清理超过N天未活跃的 session 记录"""
+    cutoff = datetime.now() - timedelta(days=days)
+    cleaned = []
+    sessions = state.get("sessions", {})
+    
+    for fname, info in list(sessions.items()):
+        distilled_at = info.get("distilled_at")
+        if not distilled_at:
+            continue
+        try:
+            dt = datetime.fromisoformat(distilled_at)
+            if dt < cutoff:
+                del sessions[fname]
+                cleaned.append(fname)
+        except:
+            pass
+    
+    if cleaned:
+        print(f"[清理] 移除 {len(cleaned)} 个过期 session 记录: {cleaned}")
+    return state, cleaned
+
+# ========== Session 文件扫描（断点续传） ==========
+def get_session_with_progress(sessions_dir, state, force=False):
+    """
+    返回需要处理的 session 文件列表及其起始行数
+    
+    Returns:
+        list of (filepath, start_line) — start_line 为已处理行数（下次从该行之后继续）
+    """
     p = Path(sessions_dir)
     if not p.exists():
-        return files
+        return []
+    
+    sessions_state = state.get("sessions", {})
+    global_last_run = state.get("global_last_run")
+    if global_last_run:
+        try:
+            last_run_dt = datetime.fromisoformat(global_last_run)
+        except:
+            last_run_dt = None
+    else:
+        last_run_dt = None
+    
+    result = []
+    
     for f in p.glob("*.jsonl"):
-        mtime = datetime.fromtimestamp(f.stat().st_mtime)
-        if mtime > since_dt:
-            files.append(f)
-    return files
+        fname = f.name
+        current_lines = count_lines(f)
+        
+        if fname in sessions_state:
+            # 已有记录：检查是否有增量
+            processed_lines = sessions_state[fname].get("processed_lines", 0)
+            if current_lines > processed_lines:
+                result.append((str(f), processed_lines))
+                # 更新总行数（便于后续追踪）
+                sessions_state[fname]["current_lines"] = current_lines
+            else:
+                # 无增量，跳过
+                pass
+        else:
+            # 新 session 或 force 模式
+            if force:
+                result.append((str(f), 0))
+            elif last_run_dt:
+                # 只处理 global_last_run 之后修改的文件
+                mtime = datetime.fromtimestamp(f.stat().st_mtime)
+                if mtime > last_run_dt:
+                    result.append((str(f), 0))
+                # 否则跳过（认为没有新内容）
+            else:
+                # 没有任何记录，当新文件处理
+                result.append((str(f), 0))
+    
+    return result
 
+def count_lines(filepath):
+    """快速统计文件行数"""
+    try:
+        with open(filepath, 'rb') as f:
+            return sum(1 for _ in f)
+    except:
+        return 0
+
+def read_sessions_from_file(filepath, start_line=0):
+    """读取指定文件的对话，从 start_line 之后开始读取"""
+    conversations = []
+    with open(filepath) as fp:
+        for i, line in enumerate(fp):
+            if i < start_line:
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                if obj.get("type") == "message":
+                    msg = obj.get("message", {})
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        content = " ".join(c.get("text", "") for c in content if c.get("type") == "text")
+                    if role in ("user", "assistant") and content.strip():
+                        clean = extract_user_content(content) if role == "user" else content.strip()
+                        if clean and len(clean) > 5:
+                            conversations.append({
+                                "session": Path(filepath).name, 
+                                "role": role, 
+                                "content": clean[:500]
+                            })
+            except:
+                pass
+    return conversations
+
+# ========== 原有函数（保持不变） ==========
 def extract_user_content(text):
     if text.startswith("System:"):
         m = re.search(r'Sender \(untrusted metadata\):[\s\S]+?\n\n([\s\S]+)$', text)
         if m and m.group(1).strip():
             return m.group(1).strip()
     return text.strip()
-
-def read_sessions(files):
-    conversations = []
-    for f in files:
-        with open(f) as fp:
-            for line in fp:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if obj.get("type") == "message":
-                        msg = obj.get("message", {})
-                        role = msg.get("role", "")
-                        content = msg.get("content", "")
-                        if isinstance(content, list):
-                            content = " ".join(c.get("text", "") for c in content if c.get("type") == "text")
-                        if role in ("user", "assistant") and content.strip():
-                            clean = extract_user_content(content) if role == "user" else content.strip()
-                            if clean and len(clean) > 5:
-                                conversations.append({"session": f.name, "role": role, "content": clean[:500]})
-                except:
-                    pass
-    return conversations
 
 def distill_batch(conversations_batch, llm_client):
     """蒸馏一批对话，返回 block 列表"""
@@ -123,7 +243,6 @@ def distill_batch(conversations_batch, llm_client):
             temperature=0.3
         )
         text = resp.choices[0].message.content.strip()
-        # 解析带层级的 block
         parsed = parse_distilled_blocks(text)
         return [(b.strip(), sessions, layer) for b, layer in parsed]
     except Exception as e:
@@ -143,8 +262,6 @@ def parse_distilled_blocks(text):
         if content:
             results.append((content, layer))
     return results
-
-
 
 def distill_conversations_batched(conversations, llm_client, batch_size=80):
     """分批蒸馏，合并结果"""
@@ -234,7 +351,6 @@ def write_blocks(blocks_with_scores, qdrant_client, embed_api_key, agent, collec
         files = ",".join([f"/root/.openclaw/agents/{agent}/sessions/{s}" for s in sessions])
         record = f"[层级:{layer}][score:{score}][distilled][sessions:{len(sessions)}][files:{files}]\n{block_text}"
 
-        # Generate embedding via REST API
         try:
             resp = requests.post(
                 "https://api.siliconflow.cn/v1/embeddings",
@@ -271,7 +387,7 @@ def write_blocks(blocks_with_scores, qdrant_client, embed_api_key, agent, collec
             print(f"  Qdrant 写入失败: {e}")
     return written
 
-
+# ========== 主流程 ==========
 def main():
     cfg = get_config()
     sessions_dir = cfg["sessions_dir"]
@@ -280,8 +396,8 @@ def main():
     agent = cfg["agent"]
     dry_run = cfg["dry_run"]
     force = cfg["force"]
-    days = cfg["days"]
     batch_size = cfg["batch_size"]
+    cleanup_days = cfg["days"] if cfg.get("cleanup") else None
 
     os.environ["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", "")
     if not os.environ.get("OPENAI_API_KEY"):
@@ -289,40 +405,52 @@ def main():
 
     from qdrant_client import QdrantClient
     from openai import OpenAI
-    from mem0 import Memory
 
     API_KEY = os.environ["OPENAI_API_KEY"]
     BASE_URL = "https://api.siliconflow.cn/v1"
     client_llm = OpenAI(api_key=API_KEY, base_url=BASE_URL)
     qdrant_client = QdrantClient(url="http://localhost:6333")
 
-
-    # Note: m (Memory) still used for scoring only in this version
-    m = Memory.from_config({
-        "vector_store": {"provider": "qdrant", "config": {"host": "localhost", "port": 6333, "collection_name": collection, "embedding_model_dims": 1024}},
-        "llm": {"provider": "openai", "config": {"model": "Qwen/Qwen2.5-7B-Instruct", "openai_base_url": BASE_URL, "temperature": 0.1}},
-        "embedder": {"provider": "openai", "config": {"model": "BAAI/bge-large-zh-v1.5", "openai_base_url": BASE_URL, "embedding_dims": 1024}}
-    })
-
     print(f"[Agent: {agent}] Collection: {collection}  Sessions: {sessions_dir}")
+    print(f"[State] {state_file}")
 
     state = load_state(state_file)
-    since_dt = datetime.now() - timedelta(days=days) if force or not state.get("last_distilled_at") else datetime.fromisoformat(state["last_distilled_at"])
-    mode_str = "强制" if force else "增量"
-    print(f"{mode_str}模式，处理最近 {days} 天（{since_dt.strftime('%Y-%m-%d')} 起）")
+    
+    # 清理过期 session 记录
+    if cleanup_days:
+        state, cleaned = cleanup_stale_sessions(state, sessions_dir, days=cleanup_days)
+        save_state(state, state_file)
 
-    files = get_session_files(sessions_dir, since_dt)
-    print(f"找到 {len(files)} 个 session 文件")
-    if not files:
+    # 获取需要处理的文件及起始行
+    files_to_process = get_session_with_progress(sessions_dir, state, force=force)
+    
+    if not files_to_process:
+        print("没有需要处理的 session 文件")
         return
 
-    convs = read_sessions(files)
-    print(f"提取了 {len(convs)} 条对话片段")
-    if not convs:
+    print(f"发现 {len(files_to_process)} 个 session 需要处理")
+    
+    # 统计总对话数
+    total_convs = 0
+    for filepath, start_line in files_to_process:
+        convs = read_sessions_from_file(filepath, start_line)
+        total_convs += len(convs)
+        print(f"  {Path(filepath).name}: 从第{start_line}行开始，{len(convs)}条新对话")
+
+    if total_convs == 0:
+        print("没有新对话可处理")
         return
+
+    # 读取所有对话
+    all_convs = []
+    for filepath, start_line in files_to_process:
+        convs = read_sessions_from_file(filepath, start_line)
+        all_convs.extend(convs)
+
+    print(f"共 {len(all_convs)} 条对话片段")
 
     print("开始分批蒸馏...")
-    blocks = distill_conversations_batched(convs, client_llm, batch_size=batch_size)
+    blocks = distill_conversations_batched(all_convs, client_llm, batch_size=batch_size)
     if not blocks:
         return
 
@@ -357,8 +485,25 @@ def main():
 
     print("写入 mem0...")
     written = write_blocks(to_store, qdrant_client, API_KEY, agent, collection)
-    save_state({"last_distilled_at": datetime.now().isoformat()}, state_file)
+    
+    # 更新状态：每个 session 的处理进度
+    now = datetime.now().isoformat()
+    for filepath, start_line in files_to_process:
+        fname = Path(filepath).name
+        current_lines = count_lines(filepath)
+        if fname not in state.get("sessions", {}):
+            state.setdefault("sessions", {})
+        state["sessions"][fname] = {
+            "processed_lines": current_lines,
+            "distilled_at": now,
+            "current_lines": current_lines
+        }
+    
+    state["global_last_run"] = now
+    save_state(state, state_file)
+    
     print(f"\n完成！写入 {written} 条")
+    print(f"状态已更新: {len(files_to_process)} 个 session")
 
 if __name__ == "__main__":
     main()

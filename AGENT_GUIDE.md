@@ -11,9 +11,9 @@ Mem0 向量记忆系统让你的 AI Agent 拥有**跨会话记住用户偏好和
 ```
 用户对话 → session JSONL 文件 → watch 监控 → sync_to_mem0 写入 → Qdrant 向量数据库
                                               ↓
-                              每天 04:00 distill 蒸馏精华（memory_distill_daily.py）
+              每天 04:00-04:25 分批 distill（memory_distill_daily.py v4）
                                               ↓
-                              每天 03:00 cleanup 清理低分记忆（memory_cleanup.py）
+                              每天 03:00 cleanup（memory_cleanup.py）
 ```
 
 **核心能力**：
@@ -22,6 +22,7 @@ Mem0 向量记忆系统让你的 AI Agent 拥有**跨会话记住用户偏好和
 - 🔍 智能检索（每次回复前自动搜索相关记忆）
 - 🔒 多 Agent 隔离（每个 Agent 记忆互不干扰）
 - 📎 来源追溯（每条记忆记录来自哪个 session 文件）
+- ⚡ Per-session 断点续传（v4，不重复处理同一 session）
 
 ---
 
@@ -33,22 +34,23 @@ Mem0 向量记忆系统让你的 AI Agent 拥有**跨会话记住用户偏好和
 
 | 脚本 | 作用 | 触发方式 |
 |------|------|---------|
-| `watch_sessions.js` | 监听 session 目录变化，触发 sync | systemd 服务自动运行 |
+| `watch_sessions.js` | 监听 session 目录变化，触发 sync | node 进程（自动运行） |
 | `sync_to_mem0.py` | 将对话实时写入 Qdrant | watch 调用 |
 | `auto_recall.py` | 检索记忆 + session 上下文 | 每次回复前调用 |
 | `auto_memory.py` | 手动保存单条记忆 | 手动调用 |
-| `memory_distill_daily.py` | 每日蒸馏（对话→精华 block） | cron（每天 04:00） |
+| `memory_distill_daily.py` | 每日蒸馏（对话→精华 block，v4） | cron（每天 04:00-04:25） |
 | `memory_cleanup.py` | 清理低分记忆 | cron（每天 03:00） |
 | `mem0-agent.py` | CLI 工具（stats/status） | 命令行 |
 
-### systemd 服务
+### 运行中的 watch 进程
 
-| 服务名 | 监控的 session 目录 | 说明 |
-|--------|---------------------|------|
-| `openclaw-session-watch-main` | `agents/main/sessions` | main agent |
-| `openclaw-session-watch-capital` | `agents/capital/sessions` | capital agent |
-| `openclaw-session-watch-dev` | `agents/dev/sessions` | dev agent |
-| ... | ... | 可扩展 |
+```
+main: 3个进程 (Mar24启动)
+capital, dev, legal, ops, bingbu, hubu, gongbu, libu, libu_hr, menxia, rich,
+shangshu, taizi, xingbu, zaochao, zhongshu: 各1个进程 (Mar25启动)
+```
+
+共 17 个 agent，全部在监听。
 
 ### 记忆存储
 
@@ -56,7 +58,8 @@ Mem0 向量记忆系统让你的 AI Agent 拥有**跨会话记住用户偏好和
 |------|---------|
 | 向量数据库 | Qdrant（`localhost:6333`），collection 名 = `mem0_{agent}` |
 | session 原始文件 | `/root/.openclaw/agents/{agent}/sessions/*.jsonl` |
-| distill 日志 | `/root/.openclaw/workspace/logs/distill_{agent}.log` |
+| distill 状态文件 | `/root/.openclaw/workspace/.distill_state_main.json`（main）|
+| | `/root/.openclaw/workspace-{agent}/.distill_state.json`（其他agent）|
 
 ---
 
@@ -76,29 +79,22 @@ dev 的对话       →  agents/dev/sessions     →  watch(dev)    →  Qdrant 
 
 ## 四、环境检查清单
 
-### 4.1 检查 systemd 服务状态
+### 4.1 检查 watch 进程状态
 
 ```bash
-# 查看所有 Agent 的 watch 服务
-systemctl list-units --all "*session-watch*" 2>/dev/null | grep openclaw
+# 查看所有 agent 的 watch 进程
+ps aux | grep watch_sessions | grep -v grep
 
-# 查看某个 Agent 是否在运行
-systemctl is-active openclaw-session-watch-main
-systemctl is-active openclaw-session-watch-capital
+# 应该看到 17+ 个进程在运行
 ```
-
-**正常状态**：所有服务显示 `active (running)`
 
 ### 4.2 检查 cron 任务
 
 ```bash
-# 查看所有记忆相关 cron
-crontab -l 2>/dev/null | grep memory
-
-# 应该看到两类（per agent）：
-# 03:00 memory_cleanup.py
-# 04:00 memory_distill_daily.py --agent {agent}
+openclaw cron list | grep -E "记忆蒸馏|记忆清理"
 ```
+
+**正常状态**：看到 1 个 cleanup + 多个 distill cron，状态为 idle/in progress
 
 ### 4.3 检查 .env 配置
 
@@ -124,32 +120,92 @@ python3 /root/.openclaw/mem0-agent-setup/scripts/auto_recall.py "测试关键词
 python3 /root/.openclaw/mem0-agent-setup/scripts/mem0-agent.py stats
 ```
 
-### 4.5 查看日志
+### 4.5 检查向量库状态
 
 ```bash
-# 查看某个 Agent 的 watch 日志
-journalctl -u openclaw-session-watch-main --no-pager -n 30
+# 查看所有 collection 的 point 数量
+curl -s http://localhost:6333/collections | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for c in d['result']['collections']:
+    name=c['name']
+    if name.startswith('mem0_'):
+        import requests
+        r=requests.get(f'http://localhost:6333/collections/{name}')
+        cnt=r.json()['result']['points_count']
+        print(f'{name}: {cnt} points')
+"
+```
 
-# 查看 distill 日志
-cat /root/.openclaw/workspace/logs/distill_main.log | tail -20
+### 4.6 检查 distill 状态
+
+```bash
+# 查看某 agent 的 distill 状态
+cat /root/.openclaw/workspace/.distill_state_main.json
+cat /root/.openclaw/workspace-capital/.distill_state.json
 ```
 
 ---
 
-## 五、新 Agent 如何接入
+## 五、Cron 任务详解
+
+### 每日分批时间表
+
+| 时间 | 任务 | Agent |
+|------|------|-------|
+| 03:00 | 记忆清理 | main |
+| 04:00 | 记忆蒸馏 | main, capital, dev |
+| 04:05 | 记忆蒸馏 | bingbu, gongbu |
+| 04:10 | 记忆蒸馏 | legal, ops |
+| 04:15 | 记忆蒸馏 | libu_hr, menxia, rich |
+| 04:20 | 记忆蒸馏 | xingbu |
+| 04:25 | 记忆蒸馏 | zaochao, zhongshu, shangshu, taizi, hubu, libu |
+
+### memory_distill_daily.py v4 参数
+
+```bash
+python3 memory_distill_daily.py \
+  --agent <agent_id>      # agent ID（必需）
+  --force                  # 强制全量处理（跳过断点）
+  --yes                    # 跳过确认直接写入
+  --dry-run                # 只蒸馏，不写入
+  --cleanup                # 清理过期 session 记录（配合 --days）
+  --days <N>               # 清理 N 天前未活跃的 session 记录
+  --batch-size <N>         # 每批处理多少条对话（默认80）
+```
+
+### 断点续传逻辑
+
+v4 按 session 文件+行数追踪进度，不再按时间戳：
+
+```json
+{
+  "sessions": {
+    "session_uuid.jsonl": {
+      "processed_lines": 142,    // 已处理到这个行数
+      "distilled_at": "2026-03-28T04:30:19"
+    }
+  },
+  "global_last_run": "2026-03-28T04:35:00"
+}
+```
+
+---
+
+## 六、新 Agent 如何接入
 
 当执行 `bash install.sh --auto` 时，会自动完成以下步骤：
 
 | 步骤 | 操作 | 说明 |
 |------|------|------|
 | 1 | 扫描所有 Agent | 自动发现 `/root/.openclaw/agents/` 下的所有 Agent |
-| 2 | 配置 systemd 服务 | 创建 `openclaw-session-watch-{agent}` 并启动 |
-| 3 | 配置 cron | 设置 cleanup (03:00) 和 distill (04:00) |
+| 2 | 启动 watch 进程 | 每个 agent 一个 node 进程 |
+| 3 | 配置 cron | 设置 cleanup (03:00 main) 和 distill (分批 04:00-04:25) |
 | 4 | 共用 .env | 所有 Agent 共用同一份 `.env` 配置 |
 
 ---
 
-## 六、架构决策说明
+## 七、架构决策说明
 
 ### 为什么要共用 .env？
 
@@ -170,28 +226,30 @@ cat /root/.openclaw/workspace/logs/distill_main.log | tail -20
 
 ---
 
-## 七、快速参考
+## 八、快速参考
 
 ```bash
-# 检查服务状态
-systemctl status openclaw-session-watch-{agent}
+# 检查 watch 进程
+ps aux | grep watch_sessions | grep -v grep | wc -l
 
-# 重启服务
-systemctl restart openclaw-session-watch-{agent}
-
-# 查看日志
-journalctl -u openclaw-session-watch-{agent} -f
-
-# 搜索记忆
-. /root/.openclaw/mem0-agent-setup/.env && \
-python3 /root/.openclaw/mem0-agent-setup/scripts/auto_recall.py "关键词"
+# 查看某 agent 的 distill 状态
+cat /root/.openclaw/workspace/.distill_state_main.json
 
 # 手动触发 distill（dry run）
 . /root/.openclaw/mem0-agent-setup/.env && \
 python3 /root/.openclaw/mem0-agent-setup/scripts/memory_distill_daily.py \
-  --agent {agent} --dry-run
+  --agent main --dry-run --yes
+
+# 手动清理过期 session 记录（30天未活跃）
+. /root/.openclaw/mem0-agent-setup/.env && \
+python3 /root/.openclaw/mem0-agent-setup/scripts/memory_distill_daily.py \
+  --agent main --cleanup --days 30 --yes
+
+# 搜索记忆
+. /root/.openclaw/mem0-agent-setup/.env && \
+python3 /root/.openclaw/mem0-agent-setup/scripts/auto_recall.py "关键词"
 ```
 
 ---
 
-*最后更新：2026-03-26 by 落雁 🦋*
+*最后更新：2026-03-28 by 落雁 🦋*
