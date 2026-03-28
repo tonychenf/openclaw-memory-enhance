@@ -219,7 +219,8 @@ def get_session_files_with_uuid(sessions_dir):
     if not p.exists():
         return {}
     result = {}
-    for f in p.glob("*.jsonl"):
+    # 同时扫描活跃文件(*.jsonl)和被rotate的文件(*.reset.*)
+    for f in list(p.glob("*.jsonl")) + list(p.glob("*.reset.*")):
         uuid_str, is_renamed = extract_session_uuid(str(f))
         result[uuid_str] = (str(f), is_renamed)
     return result
