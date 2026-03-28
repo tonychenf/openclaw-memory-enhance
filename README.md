@@ -213,6 +213,11 @@ WORKSPACE_DIR 路径推导 > AGENT_NAME 环境变量 > fallback "main"
 
 ## 更新日志
 
+### v8.1 (2026-03-28)
+- `auto_recall.py`：新增 Step 6（全量 session）+ 路径解析修复
+  - **Step 6**：加载当前活跃 session 的全量内容（不做截断）
+  - 修复 `get_current_session_path()`：sessions.json 结构为 `updatedAt` 最大 = 最新 session
+
 ### v8 (2026-03-28)
 - `auto_recall.py`：Step 4 + Step 5 改进，实现 Active Recall
   - Step 4：**加载整个 session 文件**（移除 keyword 匹配，直接读取完整内容）
