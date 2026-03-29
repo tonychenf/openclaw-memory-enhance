@@ -103,8 +103,8 @@ function syncFile(filepath) {
     return 0;
   }
   
-  // 同步到 Mem0
-  const messagesJson = JSON.stringify(validMessages.slice(0, 10));
+  // 同步到 Mem0（取最新的10条，而非最老的10条，避免session文件后半部的新消息被丢弃）
+  const messagesJson = JSON.stringify(validMessages.slice(-10));
   
   try {
     const result = execSync(
