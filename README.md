@@ -1,9 +1,15 @@
-# 🧠 openclaw-memory-enhance
-
-> **让 AI Agent 拥有真正的长期记忆** —— 基于 Mem0 + Qdrant 的本地化向量记忆系统，专为 [OpenClaw](https://github.com/openclaw/openclaw) 多 Agent 环境设计。
-
 [![GitHub stars](https://img.shields.io/github/stars/tonychenf/openclaw-memory-enhance)](https://github.com/tonychenf/openclaw-memory-enhance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+---
+
+[[🌐 中文版](#chinese)] &nbsp;|&nbsp; [[🌐 English](#english)]
+
+---
+
+# <a id="chinese">🧠</a> openclaw-memory-enhance
+
+> **让 AI Agent 拥有真正的长期记忆** —— 基于 Mem0 + Qdrant 的本地化向量记忆系统，专为 [OpenClaw](https://github.com/openclaw/openclaw) 多 Agent 环境设计。
 
 ---
 
@@ -121,7 +127,7 @@
 
 ```
 openclaw-memory-enhance/
-├──
+│
 ├── README.md                     # 本文件，项目总体介绍
 ├── AGENT_GUIDE.md               # AI Agent 配置指引（面向 AI 的手册）
 ├── install.sh                   # 一键安装脚本
@@ -147,15 +153,15 @@ openclaw-memory-enhance/
 │   │                            # 支持 per-session 断点续传 + 蒸馏记录表
 │   │
 │   │  ── 清理维护 ──
-│   ├── memory_cleanup.py         # 每日 03:00 执行，清理低分记忆
+│   ├── memory_cleanup.py        # 每日 03:00 执行，清理低分记忆
 │   │
 │   │  ── 辅助工具 ──
-│   ├── auto_memory.py            # 手动保存单条记忆
-│   ├── mem0-agent.py             # CLI 工具：stats / status / search
-│   ├── parse_sync_memory.py      # 解析 sync 写入的记忆
-│   ├── sync_all_to_mem0.py       # 全量同步（手动触发）
-│   ├── test_recall.py            # 检索测试脚本
-│   ├── config.env.example         # 环境变量示例
+│   ├── auto_memory.py           # 手动保存单条记忆
+│   ├── mem0-agent.py            # CLI 工具：stats / status / search
+│   ├── parse_sync_memory.py     # 解析 sync 写入的记忆
+│   ├── sync_all_to_mem0.py      # 全量同步（手动触发）
+│   ├── test_recall.py           # 检索测试脚本
+│   ├── config.env.example       # 环境变量示例
 │   │
 │   └── backup/                   # 备份脚本
 │
@@ -297,7 +303,7 @@ vim /root/.openclaw/mem0-agent-setup/.env
 ```bash
 OPENAI_API_KEY=sk-xxxxxxxx          # 你的 SiliconFlow API Key
 OPENAI_BASE_URL=https://api.siliconflow.cn/v1
-MEM0_USER_ID=fuge                    # 固定用户 ID
+MEM0_USER_ID=fuge                   # 固定用户 ID
 ```
 
 ### 第三步：一键安装
@@ -558,3 +564,571 @@ MIT License
 ---
 
 **🦋 让每一个 AI Agent 都不再是陌生人。**
+
+---
+
+# <a id="english">🧠</a> openclaw-memory-enhance (English)
+
+> **Give Your AI Agent True Long-Term Memory** — A local vector memory system based on Mem0 + Qdrant, designed for the [OpenClaw](https://github.com/openclaw/openclaw) multi-Agent environment.
+
+---
+
+## 🌟 Elevator Pitch
+
+**Every conversation is remembered. No repetition needed.**
+
+---
+
+## 🤯 The Problem
+
+Ever run into these frustrations?
+
+| Scenario | Pain Level |
+|----------|------------|
+| 🤕 **Every restart feels like meeting a stranger** — AI doesn't remember who you are, your preferences, your project context | 💔💔💔💔💔 |
+| 📄 **Chat history keeps growing** — 3 months of logs stuffed into context, API costs explode | 💰💰💰💰 |
+| 😤 **Important info vanishes** — User said "I'm the boss" then AI asks "What's your name?" | 😠😠😠 |
+| 🔀 **Memory bleeds across Agents** — capital agent thinks it's the legal agent | 🤯🤯🤯 |
+
+**Root cause**: LLMs have no persistent memory. Every session starts from scratch.
+
+---
+
+## 💡 The Solution
+
+This project builds a **private vector memory system** for every OpenClaw Agent:
+
+```
+User says "I love blue best"
+       ↓
+  Auto-stored to local Qdrant vector database
+       ↓
+User asks "Any recommendations?"
+       ↓
+  Auto-retrieve "blue preference"
+       ↓
+  Personalized recommendation ✨
+```
+
+### Core Stack
+
+| Tech | Role |
+|------|------|
+| **[Mem0](https://github.com/mem0ai/mem0)** | Memory management framework (Python SDK) |
+| **[Qdrant](https://github.com/qdrant/qdrant)** | Local vector database (Docker, one-command startup) |
+| **OpenClaw Sessions** | Source of conversation history (JSONL files) |
+| **watch_sessions.js** | Real-time session monitoring, auto-triggers memory writes |
+
+**100% local deployment. Your data, your control.**
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        User Conversation                         │
+│          (Feishu / WhatsApp / Discord / Terminal ...)           │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    OpenClaw Agent Session                        │
+│             /root/.openclaw/agents/{agent}/sessions/            │
+│                         *.jsonl files                           │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+            ┌────────────┴────────────┐
+            ▼                         ▼
+┌───────────────────────┐   ┌───────────────────────────────────┐
+│  watch_sessions.js    │   │     memory_distill_daily.py       │
+│  (Real-time Monitor,  │   │     (Daily Distillation,          │
+│   Node.js process)    │   │      cron 04:00-04:25)            │
+│  Polls every 5 secs   │   │     Distills convos into         │
+│                       │   │     distilled memory blocks        │
+└───────────┬───────────┘   └──────────────┬────────────────────┘
+            │                              │
+            ▼                              ▼
+┌───────────────────────────────────────────────────────────────┐
+│                      sync_to_mem0.py                          │
+│  Real-time: conversation → Qdrant (realtime layer, score=3)   │
+│  Daily: distilled blocks → Qdrant (distilled layer, score=3-5) │
+└────────────────────────────┬──────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     Qdrant Vector Database                      │
+│                  localhost:6333 (Docker)                        │
+│                                                                  │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │
+│  │ mem0_main   │  │ mem0_dev    │  │ mem0_capital│  ...      │
+│  └─────────────┘  └─────────────┘  └─────────────┘              │
+│                                                                  │
+│  Each record metadata: layer / score / agent_id / created_at    │
+└────────────────────────────┬──────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      auto_recall.py                            │
+│  Auto-retrieves before every reply:                            │
+│  ① Qdrant semantic search (distilled memory, filtered by score) │
+│  ② Append recent 20 realtime entries (by time order)            │
+│  ③ Fill in session context (source file + raw conversation)    │
+└────────────────────────────┬──────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      AI Agent Reply                             │
+│  "Based on what you said earlier, you prefer blue, so I'd       │
+│   recommend this..."                                           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📁 Project Structure
+
+```
+openclaw-memory-enhance/
+│
+├── README.md                    # This file, project overview
+├── AGENT_GUIDE.md              # AI Agent configuration guide (for AI agents)
+├── install.sh                   # One-command install script
+│
+├── scripts/                     # ⭐ Core scripts (shared by all agents)
+│   │
+│   │  ── Real-time Monitor ──
+│   ├── watch_sessions.js        # Node.js process, monitors session file changes
+│   │                            # Polls every 5 seconds, auto-triggers sync on new content
+│   │
+│   │  ── Memory Write ──
+│   ├── sync_to_mem0.py          # Real-time write: conversation → Qdrant (realtime layer)
+│   │                            # Writes with metadata: layer=realtime, score=3
+│   │                            # Parses Feishu format, extracts real user messages
+│   │
+│   │  ── Memory Retrieval ──
+│   ├── auto_recall.py           # v8: Called before every reply, returns formatted memory
+│   │                            # Semantic search + realtime append + session context
+│   │
+│   │  ── Daily Distillation ──
+│   ├── memory_distill_daily.py  # v5: Daily cron job
+│   │                            # Distills raw conversations into refined memory blocks
+│   │                            # (LLM scored 1-5)
+│   │                            # Supports per-session checkpoint/resume + distillation log
+│   │
+│   │  ── Cleanup ──
+│   ├── memory_cleanup.py        # Runs at 03:00 daily, cleans low-score memories
+│   │
+│   │  ── Utilities ──
+│   ├── auto_memory.py           # Manually save a single memory
+│   ├── mem0-agent.py            # CLI tool: stats / status / search
+│   ├── parse_sync_memory.py     # Parse sync-written memories
+│   ├── sync_all_to_mem0.py      # Full sync (manual trigger)
+│   ├── test_recall.py           # Retrieval test script
+│   ├── config.env.example       # Environment variable template
+│   │
+│   └── backup/                   # Backup scripts
+│
+├── crontab                       # System crontab configuration
+│
+└── docs/                         # Supplementary documents (optional)
+```
+
+**Key Design Principle**: All agents **share the same scripts**, using `--agent-id` or environment variables to specify which agent's data to operate on.
+
+---
+
+## 🧠 Four-Layer Memory Architecture
+
+The system uses a **four-layer memory architecture**, each layer serving different purposes and lifecycles:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  🍯 Semantic Layer                                           │
+│  Purpose: User preferences, communication style, language     │
+│  Examples: "User prefers concise replies", "User speaks      │
+│             Chinese", "User is called Fuge"                  │
+│  Trigger: User expresses preferences, habits, identity      │
+├──────────────────────────────────────────────────────────────┤
+│  📅 Episodic Layer                                           │
+│  Purpose: Historical decisions, major events, project status │
+│  Examples: "User chose Qdrant", "Project selection done"      │
+│  Trigger: User makes decisions, describes events, evaluates  │
+├──────────────────────────────────────────────────────────────┤
+│  ⚙️ Procedural Layer                                         │
+│  Purpose: Workflows, operational steps, agreed rules         │
+│  Examples: "Need weekly progress report on Mondays",        │
+│             "Deployment uses docker-compose"                 │
+│  Trigger: User sets rules, describes processes, makes reqs    │
+├──────────────────────────────────────────────────────────────┤
+│  ⚡ Realtime Layer                                           │
+│  Purpose: Raw records of the current conversation           │
+│  Examples: "What did the user just ask?", "What did the     │
+│             assistant just reply?"                           │
+│  Trigger: Written in real-time for every conversation        │
+│           (realtime layer, score=3, no filtering)            │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Scoring Rules
+
+| Score | Type | Description | Store in Main DB |
+|-------|------|-------------|-----------------|
+| ⭐⭐⭐⭐⭐ 5 | Core Info | Name, identity, relationships, major commitments | ✅ |
+| ⭐⭐⭐⭐ 4 | Important Preference | Likes/dislikes, significant habits | ✅ |
+| ⭐⭐⭐ 3 | General Info | Daily conversation, useful but not critical | ✅ |
+| ⭐ 1-2 | Low Value | Small talk, greetings | ❌ Clean up |
+
+---
+
+## 🔄 Two Memory Write Modes
+
+### Mode 1: Real-time Write (sync_to_mem0.py)
+
+**Goal**: Not a single message missed.
+
+```
+User ←→ AI conversation
+         ↓
+    Every message pair (user + assistant) auto-written to Qdrant
+         ↓
+    metadata: layer=realtime, score=3
+```
+
+**Characteristics**:
+- 100% coverage, no conversation lost
+- No length filtering (minimum 5 characters)
+- Auto-parses Feishu System wrapping
+- Supports content-as-list JSONL format
+- Default score=3
+
+### Mode 2: Daily Distillation (memory_distill_daily.py)
+
+**Goal**: Refine essence, remove noise.
+
+```
+session JSONL files (large volume of raw conversations)
+         ↓
+    LLM scoring + content distillation
+         ↓
+    Refined blocks written to Qdrant
+         ↓
+    metadata: layer=semantic/episodic/procedural, score=3-5
+```
+
+**Characteristics**:
+- Per-session checkpoint/resume (no duplicate processing)
+- Distillation log table (Qdrant collection) tracks each session's state
+- Supports `.reset.TIMESTAMP` renamed file UUID tracing
+- Auto-cleanup of low-score memories older than 30 days
+
+---
+
+## 📊 Cron Scheduled Tasks
+
+All tasks recorded in `crontab`, executed daily:
+
+| Time | Task | Description |
+|------|------|-------------|
+| `03:00` | memory_cleanup.py | Clean low-score memories older than 30 days |
+| `04:00` | memory_distill (main, capital, dev) | Batch 1 |
+| `04:05` | memory_distill (bingbu, gongbu) | Batch 2 |
+| `04:10` | memory_distill (legal, ops) | Batch 3 |
+| `04:15` | memory_distill (libu_hr, menxia, rich) | Batch 4 |
+| `04:20` | memory_distill (xingbu) | Batch 5 |
+| `04:25` | memory_distill (zaochao, zhongshu, shangshu, taizi, hubu, libu) | Batch 6 |
+| `23:59` | sync_sessions_to_memory.js | Daily full sync |
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Linux (Ubuntu 20.04+)
+- Python 3.8+
+- Docker (for Qdrant vector database)
+- OpenClaw installed and running
+
+### Step 1: Start Qdrant
+
+```bash
+docker run -d --name qdrant \
+  -p 6333:6333 \
+  -p 6334:6334 \
+  -v qdrant_storage:/qdrant/storage \
+  qdrant/qdrant
+```
+
+### Step 2: Configure Environment Variables
+
+```bash
+cp scripts/config.env.example /root/.openclaw/mem0-agent-setup/.env
+vim /root/.openclaw/mem0-agent-setup/.env
+```
+
+Must set:
+```bash
+OPENAI_API_KEY=sk-xxxxxxxx          # Your SiliconFlow API Key
+OPENAI_BASE_URL=https://api.siliconflow.cn/v1
+MEM0_USER_ID=fuge                   # Fixed user ID
+```
+
+### Step 3: One-Command Install
+
+```bash
+cd /root/.openclaw/project/mem0-agent-setup
+bash install.sh --auto
+```
+
+This automatically:
+- Detects already-installed components (no duplicate installs)
+- Configures watch processes for all 17 agents
+- Sets up cron scheduled tasks
+
+### Step 4: Test
+
+```bash
+# Load environment variables
+source /root/.openclaw/mem0-agent-setup/.env
+
+# Search memories
+python3 scripts/auto_recall.py "Fuge"
+
+# Manually trigger daily distillation (dry run)
+python3 scripts/memory_distill_daily.py --agent main --dry-run --yes
+
+# Check agent status
+python3 scripts/mem0-agent.py status --agent main
+```
+
+---
+
+## 📚 Core Scripts Explained
+
+### watch_sessions.js
+
+> Node.js background process that monitors session file changes.
+
+**How it works**:
+```
+Poll session directory every 5 seconds
+       ↓
+Compare file modification times (mtime)
+       ↓
+New content detected → Read unprocessed message pairs from JSONL
+       ↓
+Call sync_to_mem0.py to write to Qdrant
+```
+
+**Process management**:
+```bash
+# Check running watch processes
+ps aux | grep watch_sessions
+
+# Restart watch for a specific agent
+systemctl restart openclaw-session-watch@{agent}
+
+# View logs
+journalctl -u openclaw-session-watch@main -f
+```
+
+### sync_to_mem0.py
+
+> Python script that writes conversations to Qdrant in real-time.
+
+**Processing logic**:
+```python
+# 1. Read session JSONL file
+# 2. Extract user + assistant message pairs
+# 3. Parse Feishu System wrapping, extract real user messages
+# 4. Filter: len < 5 or System wrapper residue → skip
+# 5. Format as [realtime][score:3] user message
+# 6. m.add() write to Qdrant, metadata={'layer': 'realtime'}
+```
+
+**Supported session format**:
+```jsonl
+{"type":"message","message":{"role":"user","content":"[{\"type\":\"text\",\"text\":\"User message\"}]"}}
+{"type":"message","message":{"role":"assistant","content":"[{\"type\":\"text\",\"text\":\"Assistant reply\"}]"}}
+```
+
+### auto_recall.py
+
+> v8: Memory retrieval script called before every reply.
+
+**Retrieval flow**:
+```
+User asks: "What does 天王盖地虎 mean?"
+       ↓
+① Generate query embedding (bge-large-zh-v1.5)
+       ↓
+② Qdrant semantic search (top 8, by relevance)
+       ↓
+③ Parse results:
+   - Distilled memories → filter by score (< min_score discard)
+   - Realtime memories → no filtering, append all
+       ↓
+④ Append recent 20 realtime entries④ Append recent 20 realtime entries (by time order, not relevance)
+       ↓
+⑤ Group by layer (semantic / episodic / procedural / realtime)
+       ↓
+⑥ Format output:
+   
+   ## 📚 Related Memories
+   
+   Semantic memories (user preferences, communication habits):
+     [Semantic] User is called Fuge, is the company boss [score=4]
+   
+   Real-time captured raw memory fragments:
+     [Realtime] What does 天王盖地虎 mean? [score=3]
+     [Realtime] Two little mice. This is a traditional Chinese password game. [score=3]
+```
+
+### memory_distill_daily.py
+
+> v5: Daily conversation distillation script.
+
+**Core functionality**:
+- Read session JSONL files
+- LLM scoring + content distillation
+- Generate refined blocks
+- Write to Qdrant (layer = semantic/episodic/procedural)
+
+**Per-session checkpoint/resume**:
+```json
+// Qdrant: distill_session_records collection
+{
+  "session_id": "7c86da32-ea18-4a3a-90b7-5d65bb1c2f53",
+  "agent_id": "main",
+  "remark_1": "2026-03-29T04:30:19",
+  "remark_2": "142 lines processed",
+  "remark_3": ""
+}
+```
+
+---
+
+## 🐛 Multi-Agent Support (17 Agents)
+
+| Agent | Collection | Purpose | Status |
+|-------|------------|---------|--------|
+| main | mem0_main | Main conversation agent | ✅ Running |
+| capital | mem0_capital | Quantitative trading analysis | ✅ Running |
+| dev | mem0_dev | Development assistant | ✅ Running |
+| legal | mem0_legal | Legal counsel | ✅ Running |
+| ops | mem0_ops | Operations management | ✅ Running |
+| rich | mem0_rich | Financial advisor | ✅ Running |
+| bingbu | mem0_bingbu | Bingbu agent | ✅ Running |
+| gongbu | mem0_gongbu | Gongbu agent | ✅ Running |
+| hubu | mem0_hubu | Hubu agent | ✅ Running |
+| libu | mem0_libu | Libu agent | ✅ Running |
+| libu_hr | mem0_libu_hr | Human resources | ✅ Running |
+| menxia | mem0_menxia | Menxia | ✅ Running |
+| shangshu | mem0_shangshu | Shangshu | ✅ Running |
+| taizi | mem0_taizi | Taizi agent | ✅ Running |
+| xingbu | mem0_xingbu | Xingbu agent | ✅ Running |
+| zaochao | mem0_zaochao | Morning court agent | ✅ Running |
+| zhongshu | mem0_zhongshu | Zhongshu | ✅ Running |
+
+**Isolation mechanism**: Each agent's memories are stored in an independent Qdrant collection, named `mem0_{agent}`, completely isolated from each other.
+
+---
+
+## 🛠️ Operations & Maintenance
+
+### Check all watch processes
+
+```bash
+ps aux | grep watch_sessions | grep -v grep
+```
+
+### Check cron tasks
+
+```bash
+openclaw cron list
+openclaw cron runs <task-id>
+```
+
+### View Qdrant data statistics
+
+```bash
+python3 scripts/mem0-agent.py stats --agent main
+```
+
+### Manually trigger memory distillation
+
+```bash
+# dry run (don't write, just see how much would be processed)
+python3 scripts/memory_distill_daily.py --agent main --dry-run --yes
+
+# force process last N days (fallback for missed runs)
+python3 scripts/memory_distill_daily.py --agent main --days 3 --yes
+```
+
+### Memory cleanup
+
+```bash
+# Clean low-score memories older than 30 days
+python3 scripts/memory_cleanup.py 30
+```
+
+---
+
+## 📖 Documentation
+
+| Document | Content |
+|----------|---------|
+| **README.md** | Project overview (this file) |
+| **[AGENT_GUIDE.md](AGENT_GUIDE.md)** | AI Agent configuration guide (for AI agents) |
+| **[Feishu Doc](https://www.feishu.cn/docx/L0HldmlNSobggfxAohFcRL2nnSh)** | Online documentation with screenshots |
+
+---
+
+## 📝 Changelog
+
+### v8 (2026-03-29)
+
+**auto_recall.py**:
+- `qdrant_search` removes layer filtering, supports all layers
+- Added `fetch_recent_realtime()` function, appends recent 20 realtime entries
+- `parse_memory` supports realtime format `[realtime][score:3]` parsing
+- Realtime data not filtered by score, appended in full
+- `layer_order` adds "realtime", ensures realtime results output
+- `lookup_session_snippets` filters System wrapping and toolResult messages
+
+**sync_to_mem0.py**:
+- Removed LLM evaluation, directly writes all conversations
+- Fixed Feishu format content parsing (list → string)
+- Lowered minimum length threshold 10→5
+- Added System wrapping parsing, extracts real user messages
+- metadata={'layer': 'realtime'} write to Qdrant
+
+### v7 (2026-03-28)
+
+**auto_recall.py**:
+- Qdrant REST API replaced mem0.search()
+- Layer filtering: only search Semantic/Episodic/Procedural
+- Realtime sync data filtered, no longer interferes with results
+
+### v5 (2026-03-28)
+
+**memory_distill_daily.py**:
+- Session distillation log table (Qdrant) replaces local state file
+- Per-session checkpoint/resume + UUID tracking
+- Supports `.reset.TIMESTAMP` renamed file UUID tracing
+
+### v4 (2026-03-28)
+
+- Per-session checkpoint/resume
+- Cron batch schedule (17 agents divided into 6 batches)
+
+---
+
+## 🤝 License
+
+MIT License
+
+---
+
+**🦋 Let every AI Agent no longer be a stranger.**
