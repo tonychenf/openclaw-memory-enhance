@@ -264,11 +264,11 @@ session JSONL 文件（大量原始对话）
 |------|------|------|
 | `03:00` | memory_cleanup.py | 清理 30 天前低分记忆 |
 | `04:00` | memory_distill (main, capital, dev) | 第一批蒸馏 |
-| `04:05` | memory_distill (bingbu, gongbu) | 第二批 |
-| `04:10` | memory_distill (legal, ops) | 第三批 |
-| `04:15` | memory_distill (libu_hr, menxia, rich) | 第四批 |
-| `04:20` | memory_distill (xingbu) | 第五批 |
-| `04:25` | memory_distill (zaochao, zhongshu, shangshu, taizi, hubu, libu) | 第六批 |
+| `04:05` | memory_distill (......) | 第二批 |
+| `04:10` | memory_distill (......) | 第三批 |
+| `04:15` | memory_distill (......) | 第四批 |
+| `04:20` | memory_distill (......) | 第五批 |
+| `04:25` | memory_distill (......) | 第六批 |
 | `23:59` | sync_sessions_to_memory.js | 每日全量同步 |
 
 ---
