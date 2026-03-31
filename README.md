@@ -441,32 +441,6 @@ journalctl -u openclaw-session-watch@main -f
 
 ---
 
-## 🐛 多 Agent 支持（17 个 Agent）
-
-| Agent | Collection | 用途 | 状态 |
-|-------|------------|------|------|
-| main | mem0_main | 主对话 agent | ✅ 运行中 |
-| capital | mem0_capital | 量化交易分析 | ✅ 运行中 |
-| dev | mem0_dev | 开发助手 | ✅ 运行中 |
-| legal | mem0_legal | 法律顾问 | ✅ 运行中 |
-| ops | mem0_ops | 运维管理 | ✅ 运行中 |
-| rich | mem0_rich | 理财顾问 | ✅ 运行中 |
-| bingbu | mem0_bingbu | 兵部 agent | ✅ 运行中 |
-| gongbu | mem0_gongbu | 工部 agent | ✅ 运行中 |
-| hubu | mem0_hubu | 户部 agent | ✅ 运行中 |
-| libu | mem0_libu | 礼部 agent | ✅ 运行中 |
-| libu_hr | mem0_libu_hr | 人力资源 | ✅ 运行中 |
-| menxia | mem0_menxia | 门下省 | ✅ 运行中 |
-| shangshu | mem0_shangshu | 尚书省 | ✅ 运行中 |
-| taizi | mem0_taizi | 太子agent | ✅ 运行中 |
-| xingbu | mem0_xingbu | 刑部 agent | ✅ 运行中 |
-| zaochao | mem0_zaochao | 早朝 agent | ✅ 运行中 |
-| zhongshu | mem0_zhongshu | 中书省 | ✅ 运行中 |
-
-**隔离机制**：每个 agent 的记忆存在独立的 Qdrant collection 中，命名格式 `mem0_{agent}`，完全隔离，互不干扰。
-
----
-
 ## 🛠️ 运维管理
 
 ### 查看所有 watch 进程
@@ -553,7 +527,7 @@ python3 scripts/memory_cleanup.py 30
 ### v4 (2026-03-28)
 
 - Per-session 断点续传
-- Cron 分批时间表（17 agent 分 6 批）
+- Cron 分批时间表（多 agent 分 6 批）
 
 ---
 
@@ -831,12 +805,12 @@ All tasks recorded in `crontab`, executed daily:
 | Time | Task | Description |
 |------|------|-------------|
 | `03:00` | memory_cleanup.py | Clean low-score memories older than 30 days |
-| `04:00` | memory_distill (main, capital, dev) | Batch 1 |
-| `04:05` | memory_distill (bingbu, gongbu) | Batch 2 |
-| `04:10` | memory_distill (legal, ops) | Batch 3 |
-| `04:15` | memory_distill (libu_hr, menxia, rich) | Batch 4 |
-| `04:20` | memory_distill (xingbu) | Batch 5 |
-| `04:25` | memory_distill (zaochao, zhongshu, shangshu, taizi, hubu, libu) | Batch 6 |
+| `04:00` | memory_distill (batch 1) | Batch 1 |
+| `04:05` | memory_distill (batch 2) | Batch 2 |
+| `04:10` | memory_distill (batch 3) | Batch 3 |
+| `04:15` | memory_distill (batch 4) | Batch 4 |
+| `04:20` | memory_distill (batch 5) | Batch 5 |
+| `04:25` | memory_distill (batch 6) | Batch 6 |
 | `23:59` | sync_sessions_to_memory.js | Daily full sync |
 
 ---
@@ -1006,32 +980,6 @@ User asks: "What does 天王盖地虎 mean?"
   "remark_3": ""
 }
 ```
-
----
-
-## 🐛 Multi-Agent Support (17 Agents)
-
-| Agent | Collection | Purpose | Status |
-|-------|------------|---------|--------|
-| main | mem0_main | Main conversation agent | ✅ Running |
-| capital | mem0_capital | Quantitative trading analysis | ✅ Running |
-| dev | mem0_dev | Development assistant | ✅ Running |
-| legal | mem0_legal | Legal counsel | ✅ Running |
-| ops | mem0_ops | Operations management | ✅ Running |
-| rich | mem0_rich | Financial advisor | ✅ Running |
-| bingbu | mem0_bingbu | Bingbu agent | ✅ Running |
-| gongbu | mem0_gongbu | Gongbu agent | ✅ Running |
-| hubu | mem0_hubu | Hubu agent | ✅ Running |
-| libu | mem0_libu | Libu agent | ✅ Running |
-| libu_hr | mem0_libu_hr | Human resources | ✅ Running |
-| menxia | mem0_menxia | Menxia | ✅ Running |
-| shangshu | mem0_shangshu | Shangshu | ✅ Running |
-| taizi | mem0_taizi | Taizi agent | ✅ Running |
-| xingbu | mem0_xingbu | Xingbu agent | ✅ Running |
-| zaochao | mem0_zaochao | Morning court agent | ✅ Running |
-| zhongshu | mem0_zhongshu | Zhongshu | ✅ Running |
-
-**Isolation mechanism**: Each agent's memories are stored in an independent Qdrant collection, named `mem0_{agent}`, completely isolated from each other.
 
 ---
 
