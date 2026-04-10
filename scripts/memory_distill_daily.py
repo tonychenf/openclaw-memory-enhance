@@ -223,16 +223,17 @@ def add_distilled_record(session_id, agent_id):
 def get_session_files_with_uuid(sessions_dir):
     """
     扫描 sessions 目录，返回所有 session 文件的 UUID 信息。
-    返回：dict {uuid_str: (filepath, is_renamed)}
+    返回：list of (uuid_str, filepath, is_renamed)
+    用 list 避免同一 UUID 多个文件时被 dict 覆盖（如 .reset 和新 .jsonl 共用 UUID）
     """
     p = Path(sessions_dir)
     if not p.exists():
-        return {}
-    result = {}
+        return []
+    result = []
     # 同时扫描活跃文件(*.jsonl)和被rotate的文件(*.reset.*)
     for f in list(p.glob("*.jsonl")) + list(p.glob("*.reset.*")):
         uuid_str, is_renamed = extract_session_uuid(str(f))
-        result[uuid_str] = (str(f), is_renamed)
+        result.append((uuid_str, str(f), is_renamed))
     return result
 
 def get_session_with_progress(sessions_dir, state, agent, force=False):
@@ -246,18 +247,19 @@ def get_session_with_progress(sessions_dir, state, agent, force=False):
     Returns:
         list of (filepath, uuid_str, start_line)
     """
-    # 1. 扫描所有 session 文件，提取 UUID
+    # 1. 扫描所有 session 文件，提取 UUID（返回 list，每文件一条记录）
     all_sessions = get_session_files_with_uuid(sessions_dir)
     if not all_sessions:
         return []
 
     # 2. 批量查记录表，过滤已蒸馏的
-    all_uuids = set(all_sessions.keys())
+    all_uuids = set(uuid_str for uuid_str, _, _ in all_sessions)
     already_distilled = batch_check_sessions(all_uuids)
-    new_uuids = all_uuids - already_distilled
 
+    new_uuids = all_uuids - already_distilled
     if not new_uuids and not force:
-        print(f"[记录表] 所有 {len(already_distilled)} 个 session 均已蒸馏，跳过全量检查")
+        print(f"[记录表] 共 {len(all_uuids)} 个 session，其中 {len(already_distilled)} 个已蒸馏，{len(new_uuids)} 个待处理")
+        print(f"[记录表] 所有 session 均已蒸馏，跳过全量检查")
         return []
 
     print(f"[记录表] 共 {len(all_uuids)} 个 session，其中 {len(already_distilled)} 个已蒸馏，{len(new_uuids)} 个待处理")
@@ -274,30 +276,30 @@ def get_session_with_progress(sessions_dir, state, agent, force=False):
         last_run_dt = None
 
     result = []
-    for uuid_str, (filepath, is_renamed) in all_sessions.items():
-        # 已蒸馏但无增量 → 跳过
-        if uuid_str in already_distilled and not force:
-            if is_renamed:
-                print(f"[记录表] {uuid_str} (已重命名) 已蒸馏，跳过")
+    for uuid_str, filepath, is_renamed in all_sessions:
+        # .reset 文件：强制从 line 0 处理（不跳过），因为包含历史内容可能未被完整蒸馏
+        is_reset_file = is_renamed or ".reset." in filepath
+
+        if not is_reset_file and uuid_str in already_distilled and not force:
+            # 非 reset 文件且已蒸馏 → 跳过
             continue
 
-        # 新 session 或 force
         current_lines = count_lines(filepath)
 
-        if uuid_str in sessions_state:
-            # per-session 状态有记录 → 断点续传
-            processed_lines = sessions_state[uuid_str].get("processed_lines", 0)
+        # per-session 状态用 (uuid, filepath) 作为 key，独立跟踪每个文件
+        state_key = f"{uuid_str}::{Path(filepath).name}"
+        if state_key in sessions_state:
+            # 断点续传
+            processed_lines = sessions_state[state_key].get("processed_lines", 0)
             if current_lines > processed_lines:
                 result.append((filepath, uuid_str, processed_lines))
-            else:
-                # 无增量
-                pass
         else:
             # 没有任何记录
-            if force:
+            if force or is_reset_file:
+                # .reset 文件强制处理（即使 force=False）
                 result.append((filepath, uuid_str, 0))
             elif last_run_dt:
-                # 只处理 global_last_run 之后修改的
+                # 只处理 last_run 之后修改的
                 mtime = datetime.fromtimestamp(Path(filepath).stat().st_mtime)
                 if mtime > last_run_dt:
                     result.append((filepath, uuid_str, 0))
@@ -639,11 +641,12 @@ def main():
     now = datetime.now().isoformat()
     for filepath, uuid_str, start_line in files_to_process:
         add_distilled_record(uuid_str, agent)
-        # 同时更新 per-session 状态
+        # 同时更新 per-session 状态（用 uuid::filename 作为 key，区分同一 UUID 下的不同文件）
         current_lines = count_lines(filepath)
+        state_key = f"{uuid_str}::{Path(filepath).name}"
         if "sessions" not in state:
             state["sessions"] = {}
-        state["sessions"][uuid_str] = {
+        state["sessions"][state_key] = {
             "processed_lines": current_lines,
             "distilled_at": now,
             "current_lines": current_lines

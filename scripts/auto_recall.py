@@ -118,7 +118,7 @@ def qdrant_search(vec, agent, limit=8):
                 {
                     "key": "layer",
                     "match": {
-                        "any": ["Semantic", "semantic", "Episodic", "Procedural"]
+                        "any": ["Semantic", "semantic", "Episodic", "Procedural", "realtime"]
                     }
                 }
             ]
