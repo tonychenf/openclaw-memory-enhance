@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-auto_recall - 自动记忆读取（v11）
+auto_recall - 自动记忆读取（v12）
 设计目标：
 - 分组扁平输出：每层定义出现一次，block 用 | 分隔
 - 严谨性：边界条件，空值、异常全面处理
@@ -199,6 +199,154 @@ def fetch_recent_realtime(agent, limit=20, hours=24):
             result.append({"id": p.get("id"), "payload": p.get("payload", {})})
     
     return result
+
+
+def search_raw_reset_files(query, agent=None, exclude_session=None, limit=5, parsed=None):
+    """
+    直接搜索 .reset 文件中的对话内容，作为 Qdrant 的补充后备。
+    只搜索非当前 session 的旧 reset 文件，避免与 qdrant_search 结果重复。
+
+    策略：关键词预过滤 → embedding 重排 → 提取最相关的原始对话 block
+    返回格式与 Qdrant 结果一致。
+    """
+    if not query or len(query.strip()) < 2:
+        return []
+
+    agent = agent or get_agent_id()
+    sessions_dir = f"/root/.openclaw/agents/{agent}/sessions"
+
+    # 找非当前 session 的 .reset 文件
+    recent_files = []
+    try:
+        p = Path(sessions_dir)
+        all_resets = sorted(p.glob("*.reset.*"), key=lambda f: -f.stat().st_mtime)[:30]
+        for f in all_resets:
+            if exclude_session and str(f) == exclude_session:
+                continue
+            recent_files.append((str(f), f.stat().st_mtime))
+    except:
+        return []
+
+    if not recent_files:
+        return []
+
+    # 关键词预过滤
+    keywords = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', query)
+    if not keywords:
+        keywords = [query.strip()[:10]]
+
+    # 找包含关键词的文件+消息行
+    file_msg_map = {}
+    for fpath, mtime in recent_files:
+        matches = []
+        try:
+            with open(fpath, encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    line_lower = line.lower()
+                    if any(kw.lower() in line_lower for kw in keywords):
+                        matches.append(line)
+        except:
+            pass
+        if matches:
+            file_msg_map[fpath] = matches[:15]
+
+    if not file_msg_map:
+        return []
+
+    # Embed query（只调一次）
+    try:
+        query_vec = embed_query(query[:200])
+    except Exception:
+        return []
+
+    def cosine_sim(a, b):
+        dot = sum(x*y for x,y in zip(a,b))
+        n1 = sum(x*x for x in a)**0.5
+        n2 = sum(y*y for y in b)**0.5
+        return dot / (n1 * n2 + 1e-9)
+
+    # 对每个候选文件，找最相关的消息
+    file_best = []
+    for fpath, lines in file_msg_map.items():
+        best_score = -1
+        best_content = None
+        best_role = None
+
+        for line in lines[:10]:
+            try:
+                obj = json.loads(line)
+                if obj.get("type") != "message":
+                    continue
+                msg = obj.get("message", {})
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(c.get("text","") for c in content if c.get("type")=="text")
+                if role not in ("user", "assistant") or not content:
+                    continue
+                if content.startswith("System:"):
+                    m = re.search(r'Sender \(untrusted metadata\)[\s\S]+?\n\n([\s\S]+)$', content)
+                    content = (m.group(1) or content).strip() if m else content.strip()
+                else:
+                    content = content.strip()
+                if len(content) < 5:
+                    continue
+                try:
+                    vec = embed_query(content[:300])
+                    score = cosine_sim(vec, query_vec)
+                    if score > best_score:
+                        best_score = score
+                        best_content = content[:400]
+                        best_role = role
+                except:
+                    pass
+            except:
+                pass
+
+        if best_content and best_score > 0.35:
+            file_best.append({
+                "score": best_score,
+                "file": fpath,
+                "content": best_content,
+                "role": best_role,
+            })
+
+    if not file_best:
+        return []
+
+    # 排序取 top limit
+    file_best.sort(key=lambda x: -x["score"])
+    selected = file_best[:limit]
+
+    # 内容去重：跳过与 qdrant_search 结果内容相似的
+    results = []
+    existing_contents = {}
+    if parsed:
+        for p_item in parsed:
+            ct = p_item.get("clean_text", "")[:100]
+            existing_contents[ct] = True
+
+    for item in selected:
+        content_key = item["content"][:100]
+        # 子串去重：跳过已有内容的子串或超串
+        if any(content_key in ec or ec in content_key for ec in existing_contents):
+            continue
+        block_text = (
+            f"[层级:Episodic][score:{int(item['score']*5)}][distilled]"
+            f"[sessions:1][files:{item['file']}]\n"
+            f"{'User' if item['role']=='user' else 'Assistant'}: {item['content'][:300]}"
+        )
+        parsed_blk = parse_memory(block_text)
+        if parsed_blk:
+            parsed_blk["_payload"] = {"data": block_text, "source": "raw_reset", "file": item["file"]}
+            results.append(parsed_blk)
+            existing_contents[content_key] = True
+
+    return results
+
 
 def parse_memory(text):
     """
@@ -633,7 +781,7 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT, agent=N
     """
     搜索记忆，按层级分组，扁平输出
 
-    v10: Qdrant 语义搜索（排除realtime）+ 最近N条 realtime 追加
+    v12: Qdrant 语义搜索（排除realtime）+ .reset文件后备搜索 + 最近N条 realtime 追加
     - qdrant_search：返回相关度最高的蒸馏记忆（semantic/episodic/procedural）
     - fetch_recent_realtime：只追加真正 realtime 格式（layer=realtime 且 data 以 [realtime] 开头）的最近记录
     - session 上下文由 get_session_context 自动补全（.reset 文件内容作为块内上下文）
@@ -674,6 +822,18 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT, agent=N
             continue
         parsed_item["_payload"] = payload
         parsed.append(parsed_item)
+
+    # 后备：搜索非当前 session 的 .reset 文件（Qdrant 搜不到的旧 session 内容）
+    try:
+        current_session = get_current_session_path(agent)
+        raw_results = search_raw_reset_files(query, agent=agent, exclude_session=current_session, limit=limit, parsed=parsed)
+        for item in raw_results:
+            # 去重：跳过 content 已存在的
+            item_text = item.get("clean_text", "")[:100]
+            if not any(item_text in p.get("clean_text", "")[:100] or p.get("clean_text", "")[:100] in item_text for p in parsed):
+                parsed.append(item)
+    except:
+        pass  # 出错不影响主流程
 
     # 追加最近20条 realtime（按时序，不过滤）
     try:
