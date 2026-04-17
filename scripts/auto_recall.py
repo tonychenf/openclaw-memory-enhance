@@ -155,7 +155,8 @@ def fetch_recent_realtime(agent, limit=20, hours=24):
             "with_vectors": False,
             "filter": {
                 "must": [
-                    {"key": "layer", "match": {"value": "realtime"}}
+                    {"key": "layer", "match": {"value": "realtime"}},
+                    {"key": "created_at", "range": {"gte": cutoff}}
                 ]
             }
         }
