@@ -10,6 +10,10 @@
 - 替换 V4 的 per-session 状态文件为 Qdrant 记录表
 """
 import os, sys, re, json, time, argparse, requests
+
+# 公共噪音判断函数
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from is_noise import is_noise_content
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -81,18 +85,6 @@ def _cleanup_realtime_noise(collection):
     scroll_url = f'http://localhost:6333/collections/{collection}/points/scroll'
     delete_url = f'http://localhost:6333/collections/{collection}/points/delete'
     
-    def is_noise(d):
-        t = d.strip()
-        if '[cron:' in t: return True
-        if len(t) < 400 and '你是' in t and 'agent' in t.lower() and '请执行' in t: return True
-        if t in ('HEARTBEAT_OK', 'HEARTBEAT_TIMEOUT'): return True
-        if '<<<BEGIN_OPENCLAW' in t: return True
-        if t.startswith('[Internal') or t.startswith('Queued #'): return True
-        if 'Conversation info' in t and 'message_id' in t: return True
-        if 'Exec completed' in t and len(t) < 600: return True
-        if '.jsonl.reset.' in t: return True
-        return False
-    
     all_pts = []
     offset = None
     while True:
@@ -109,7 +101,7 @@ def _cleanup_realtime_noise(collection):
             if offset is None: break
         except: break
     
-    noisy = [p['id'] for p in all_pts if is_noise(p['payload'].get('data', ''))]
+    noisy = [p['id'] for p in all_pts if is_noise_content(p['payload'].get('data', ''))]
     if not noisy:
         print(f'[Cleanup] {collection}: 无噪音需要清理')
         return
